@@ -940,10 +940,44 @@ async function completeRunAndNotify(message: AgentResponseMessage): Promise<void
     completedAt,
   };
 
-  await saveMessage(assistantMessage);
-  await saveRun(completedRun);
-  await saveConversation(updatedConversation, conversation.value.updatedAt);
-  await saveConversationState(updatedState);
+  const atomic = kv
+    .atomic()
+    .set(messageKey(assistantMessage.conversationId, assistantMessage.messageId), assistantMessage)
+    .set(
+      messageIndexKey(
+        assistantMessage.conversationId,
+        assistantMessage.createdAt,
+        assistantMessage.messageId,
+      ),
+      assistantMessage,
+    )
+    .set(runKey(completedRun.runId), completedRun)
+    .set(
+      runIndexKey(completedRun.conversationId, completedRun.createdAt, completedRun.runId),
+      completedRun,
+    )
+    .set(conversationKey(updatedConversation.conversationId), updatedConversation)
+    .set(
+      conversationIndexKey(
+        updatedConversation.userId,
+        updatedConversation.personaId,
+        updatedConversation.updatedAt,
+        updatedConversation.conversationId,
+      ),
+      updatedConversation,
+    )
+    .set(conversationStateKey(updatedState.conversationId), updatedState);
+  if (conversation.value.updatedAt !== updatedConversation.updatedAt) {
+    atomic.delete(
+      conversationIndexKey(
+        conversation.value.userId,
+        conversation.value.personaId,
+        conversation.value.updatedAt,
+        conversation.value.conversationId,
+      ),
+    );
+  }
+  await atomic.commit();
   activeRunByConversation.delete(run.conversationId);
 
   if (pending?.clientSocket) {
@@ -1050,14 +1084,41 @@ async function queueConversationRun(input: {
   activeRunByConversation.set(input.conversation.conversationId, runId);
 
   try {
-    await saveMessage(userMessage);
-    await saveRun(queuedRun);
-    await saveConversation(updatedConversation, input.conversation.updatedAt);
-    await saveConversationState(updatedState);
-    await kv.set(
-      messageDedupeKey(input.userId, input.conversation.conversationId, input.clientMessageId),
-      dedupeValue,
-    );
+    const atomic = kv
+      .atomic()
+      .set(messageKey(userMessage.conversationId, userMessage.messageId), userMessage)
+      .set(
+        messageIndexKey(userMessage.conversationId, userMessage.createdAt, userMessage.messageId),
+        userMessage,
+      )
+      .set(runKey(queuedRun.runId), queuedRun)
+      .set(runIndexKey(queuedRun.conversationId, queuedRun.createdAt, queuedRun.runId), queuedRun)
+      .set(conversationKey(updatedConversation.conversationId), updatedConversation)
+      .set(
+        conversationIndexKey(
+          updatedConversation.userId,
+          updatedConversation.personaId,
+          updatedConversation.updatedAt,
+          updatedConversation.conversationId,
+        ),
+        updatedConversation,
+      )
+      .set(conversationStateKey(updatedState.conversationId), updatedState)
+      .set(
+        messageDedupeKey(input.userId, input.conversation.conversationId, input.clientMessageId),
+        dedupeValue,
+      );
+    if (input.conversation.updatedAt !== updatedConversation.updatedAt) {
+      atomic.delete(
+        conversationIndexKey(
+          input.conversation.userId,
+          input.conversation.personaId,
+          input.conversation.updatedAt,
+          input.conversation.conversationId,
+        ),
+      );
+    }
+    await atomic.commit();
 
     createPendingRun(
       runId,
@@ -1121,6 +1182,20 @@ async function registerAgentConnection(
   if (connection.worker?.instanceId && connection.worker.instanceId !== message.instanceId) {
     unregisterWorker(workerRegistry, connection.worker.instanceId);
     agentConnectionsByInstanceId.delete(connection.worker.instanceId);
+  }
+
+  const supersededConnection = agentConnectionsByInstanceId.get(message.instanceId);
+  if (supersededConnection && supersededConnection !== connection) {
+    if (supersededConnection.worker) {
+      unregisterWorker(workerRegistry, supersededConnection.worker.instanceId);
+    }
+    agentConnectionsByInstanceId.delete(message.instanceId);
+    supersededConnection.worker = null;
+    try {
+      supersededConnection.socket.close(1012, "superseded");
+    } catch {
+      // Ignore close failures on a dying socket.
+    }
   }
 
   const worker: WorkerRegistration = {
