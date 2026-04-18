@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>HF Space Codex Agent</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <main class="wrap">
+      <section class="card">
+        <h1>HF Space Codex Agent</h1>
+        <p>
+          This Space keeps the agent behind the curtain. Public visitors only see this intro page; the real worker
+          connects outbound to your Deno relay over a private WebSocket channel.
+        </p>
+        <ul>
+          <li><strong>Provider:</strong> {{ provider }}</li>
+          <li><strong>Model:</strong> {{ model }}</li>
+          <li><strong>API Kind:</strong> {{ api_kind }}</li>
+          <li><strong>External API key configured:</strong> {{ "yes" if api_ready else "no (placeholder mode)" }}</li>
+          <li><strong>Relay configured:</strong> {{ "yes" if relay_status.relay_configured else "no" }}</li>
+          <li><strong>Relay connected:</strong> {{ "yes" if relay_status.relay_connected else "no" }}</li>
+        </ul>
+        <p>{{ relay_hint }}</p>
+        <pre>Deno relay public endpoint:
+wss://your-deno-app.example/ws
+
+HF Space outbound bridge:
+wss://your-deno-app.example/agent?token=shared-secret</pre>
+      </section>
+    </main>
+  </body>
+</html>
