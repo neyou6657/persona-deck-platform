@@ -84,6 +84,7 @@ class CodexRunner:
         try:
             process = await asyncio.create_subprocess_exec(
                 *cmd,
+                stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
@@ -171,12 +172,13 @@ class CodexRunner:
         ]
         if thread_id:
             base.append("resume")
+        base.append("--skip-git-repo-check")
+        if not thread_id:
+            base.extend([
+                "--sandbox",
+                "danger-full-access",
+            ])
         base.extend([
-            "--skip-git-repo-check",
-            "--sandbox",
-            "danger-full-access",
-            "--ask-for-approval",
-            "never",
             "--model",
             self.config.model,
             "-c",
@@ -294,7 +296,7 @@ class CodexRunner:
         }
 
     def _extract_item_text(self, item: dict[str, Any]) -> str:
-        for key in ("output_text", "content"):
+        for key in ("output_text", "content", "text"):
             text = self._flatten_text(item.get(key))
             if text:
                 return text
