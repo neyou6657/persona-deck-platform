@@ -152,6 +152,12 @@ type PendingRun = {
   timeoutId: ReturnType<typeof setTimeout>;
 };
 
+type ActiveRunRecord = {
+  runId: string;
+  conversationId: string;
+  createdAt: string;
+};
+
 class ApiError extends Error {
   status: number;
   code: string;
@@ -170,16 +176,17 @@ const AGENT_REQUEST_TIMEOUT_MS = Number(Deno.env.get("AGENT_REQUEST_TIMEOUT_MS")
 const USER_HEADER = "x-user-id";
 const PERSONA_CATALOG_JSON = Deno.env.get("PERSONA_CATALOG_JSON") ?? "";
 const AGENT_TOKEN_PERSONAS_JSON = Deno.env.get("AGENT_TOKEN_PERSONAS_JSON") ?? "";
+const RELAY_RESTART_ERROR = "Relay restarted before the run completed";
 
 const kv = await Deno.openKv();
 const workerRegistry = createWorkerRegistryState();
 const agentConnectionsBySocket = new Map<WebSocket, AgentConnection>();
 const agentConnectionsByInstanceId = new Map<string, AgentConnection>();
 const pendingRuns = new Map<string, PendingRun>();
-const activeRunByConversation = new Map<string, string>();
 const agentTokenPolicies = parseAgentTokenPolicies();
 
 await seedPersonaCatalog();
+await recoverInterruptedRuns();
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -258,6 +265,10 @@ function runKey(runId: string): Deno.KvKey {
 
 function runIndexKey(conversationId: string, createdAt: string, runId: string): Deno.KvKey {
   return ["runByConversationCreatedAt", conversationId, createdAt, runId];
+}
+
+function conversationActiveRunKey(conversationId: string): Deno.KvKey {
+  return ["conversationActiveRun", conversationId];
 }
 
 function conversationStateKey(conversationId: string): Deno.KvKey {
@@ -420,7 +431,7 @@ function parseAgentMessage(raw: string): AgentMessage {
   }
 
   if (type === "response") {
-    const runId = normalizeString(value.runId) ?? normalizeString(value.requestId);
+    const runId = normalizeString(value.runId);
     const reply = normalizeString(value.reply);
     if (!runId || !reply) {
       throw new ApiError(400, "invalid_request", "Agent response requires runId and reply");
@@ -439,7 +450,7 @@ function parseAgentMessage(raw: string): AgentMessage {
   }
 
   if (type === "error") {
-    const runId = normalizeString(value.runId) ?? normalizeString(value.requestId);
+    const runId = normalizeString(value.runId);
     const error = normalizeString(value.error);
     if (!runId || !error) {
       throw new ApiError(400, "invalid_request", "Agent error requires runId and error");
@@ -782,6 +793,15 @@ async function listPersonas(): Promise<
     }));
 }
 
+async function recoverInterruptedRuns(): Promise<void> {
+  for await (const entry of kv.list<StoredRun>({ prefix: ["run"] })) {
+    if (entry.value.status !== "queued" && entry.value.status !== "in_progress") {
+      continue;
+    }
+    await finalizeFailedRun(entry.value, RELAY_RESTART_ERROR, "timed_out");
+  }
+}
+
 function pickLiveWorkerConnection(personaId: string, agentId?: string): AgentConnection | null {
   if (agentId) {
     for (const instanceId of workerRegistry.personaBuckets.get(personaId) ?? []) {
@@ -811,6 +831,47 @@ function pickLiveWorkerConnection(personaId: string, agentId?: string): AgentCon
     agentConnectionsByInstanceId.delete(worker.instanceId);
   }
   return null;
+}
+
+async function releaseConversationActiveRun(conversationId: string, runId: string): Promise<void> {
+  const activeEntry = await kv.get<ActiveRunRecord>(conversationActiveRunKey(conversationId));
+  if (activeEntry.value?.runId !== runId) {
+    return;
+  }
+  await kv.delete(conversationActiveRunKey(conversationId));
+}
+
+async function finalizeFailedRun(
+  run: StoredRun,
+  error: string,
+  status: Extract<RunStatus, "failed" | "timed_out">,
+): Promise<void> {
+  if (isTerminalStatus(run.status)) {
+    return;
+  }
+
+  const completedAt = nowIso();
+  const failedRun: StoredRun = {
+    ...run,
+    status,
+    error,
+    completedAt,
+  };
+
+  const existingState = await getConversationStateRecord(run.conversationId);
+  const atomic = kv
+    .atomic()
+    .set(runKey(failedRun.runId), failedRun)
+    .set(runIndexKey(failedRun.conversationId, failedRun.createdAt, failedRun.runId), failedRun);
+  if (existingState) {
+    atomic.set(conversationStateKey(existingState.conversationId), {
+      ...existingState,
+      lastRunId: run.runId,
+      updatedAt: completedAt,
+    });
+  }
+  await atomic.commit();
+  await releaseConversationActiveRun(run.conversationId, run.runId);
 }
 
 function createPendingRun(
@@ -856,42 +917,27 @@ async function failRunAndNotify(
   runId: string,
   error: string,
   status: Extract<RunStatus, "failed" | "timed_out"> = "failed",
+  knownRun?: StoredRun,
 ): Promise<void> {
   const pending = takePendingRun(runId);
-  const entry = await kv.get<StoredRun>(runKey(runId));
-  const run = entry.value;
+  const run = knownRun ?? (await kv.get<StoredRun>(runKey(runId))).value;
   if (!run || isTerminalStatus(run.status)) {
     return;
   }
 
-  const completedAt = nowIso();
-  const failedRun: StoredRun = {
-    ...run,
-    status,
-    error,
-    completedAt,
-  };
-  await saveRun(failedRun);
-  activeRunByConversation.delete(run.conversationId);
-
-  const existingState = await getConversationStateRecord(run.conversationId);
-  if (existingState) {
-    await saveConversationState({
-      ...existingState,
-      lastRunId: run.runId,
-      updatedAt: completedAt,
-    });
-  }
+  await finalizeFailedRun(run, error, status);
 
   if (pending?.clientSocket) {
     sendWsError(pending.clientSocket, error, run.runId, run.conversationId);
   }
 }
 
-async function completeRunAndNotify(message: AgentResponseMessage): Promise<void> {
+async function completeRunAndNotify(
+  message: AgentResponseMessage,
+  knownRun?: StoredRun,
+): Promise<void> {
   const pending = takePendingRun(message.runId);
-  const entry = await kv.get<StoredRun>(runKey(message.runId));
-  const run = entry.value;
+  const run = knownRun ?? (await kv.get<StoredRun>(runKey(message.runId))).value;
   if (!run || isTerminalStatus(run.status)) {
     return;
   }
@@ -978,7 +1024,7 @@ async function completeRunAndNotify(message: AgentResponseMessage): Promise<void
     );
   }
   await atomic.commit();
-  activeRunByConversation.delete(run.conversationId);
+  await releaseConversationActiveRun(run.conversationId, run.runId);
 
   if (pending?.clientSocket) {
     sendJson(pending.clientSocket, {
@@ -997,6 +1043,19 @@ async function completeRunAndNotify(message: AgentResponseMessage): Promise<void
   }
 }
 
+function assertWorkerOwnsRun(connection: AgentConnection, run: StoredRun): void {
+  if (!connection.worker) {
+    throw new ApiError(
+      400,
+      "worker_not_registered",
+      "Worker must register before sending run updates",
+    );
+  }
+  if (!run.agentInstanceId || run.agentInstanceId !== connection.worker.instanceId) {
+    throw new ApiError(409, "run_not_owned_by_worker", "Run is assigned to a different worker");
+  }
+}
+
 async function queueConversationRun(input: {
   conversation: ConversationRecord;
   userId: string;
@@ -1007,9 +1066,13 @@ async function queueConversationRun(input: {
   agentId?: string;
   clientSocket?: WebSocket | null;
 }): Promise<{ runId: string; conversationId: string; userMessageId: string; status: RunStatus }> {
-  const dedupe = await kv.get<MessageDedupeRecord>(
-    messageDedupeKey(input.userId, input.conversation.conversationId, input.clientMessageId),
+  const dedupeKeyValue = messageDedupeKey(
+    input.userId,
+    input.conversation.conversationId,
+    input.clientMessageId,
   );
+  const activeRunKeyValue = conversationActiveRunKey(input.conversation.conversationId);
+  const dedupe = await kv.get<MessageDedupeRecord>(dedupeKeyValue);
   if (dedupe.value) {
     const existingRun = await kv.get<StoredRun>(runKey(dedupe.value.runId));
     return {
@@ -1020,7 +1083,8 @@ async function queueConversationRun(input: {
     };
   }
 
-  if (activeRunByConversation.has(input.conversation.conversationId)) {
+  const activeRun = await kv.get<ActiveRunRecord>(activeRunKeyValue);
+  if (activeRun.value) {
     throw new ApiError(409, "conversation_busy", "A run is already active for this conversation");
   }
 
@@ -1080,12 +1144,17 @@ async function queueConversationRun(input: {
     messageId: userMessageId,
     createdAt,
   };
-
-  activeRunByConversation.set(input.conversation.conversationId, runId);
+  const activeRunValue: ActiveRunRecord = {
+    runId,
+    conversationId: input.conversation.conversationId,
+    createdAt,
+  };
 
   try {
     const atomic = kv
       .atomic()
+      .check(dedupe)
+      .check(activeRun)
       .set(messageKey(userMessage.conversationId, userMessage.messageId), userMessage)
       .set(
         messageIndexKey(userMessage.conversationId, userMessage.createdAt, userMessage.messageId),
@@ -1093,6 +1162,7 @@ async function queueConversationRun(input: {
       )
       .set(runKey(queuedRun.runId), queuedRun)
       .set(runIndexKey(queuedRun.conversationId, queuedRun.createdAt, queuedRun.runId), queuedRun)
+      .set(activeRunKeyValue, activeRunValue)
       .set(conversationKey(updatedConversation.conversationId), updatedConversation)
       .set(
         conversationIndexKey(
@@ -1104,10 +1174,7 @@ async function queueConversationRun(input: {
         updatedConversation,
       )
       .set(conversationStateKey(updatedState.conversationId), updatedState)
-      .set(
-        messageDedupeKey(input.userId, input.conversation.conversationId, input.clientMessageId),
-        dedupeValue,
-      );
+      .set(dedupeKeyValue, dedupeValue);
     if (input.conversation.updatedAt !== updatedConversation.updatedAt) {
       atomic.delete(
         conversationIndexKey(
@@ -1118,7 +1185,20 @@ async function queueConversationRun(input: {
         ),
       );
     }
-    await atomic.commit();
+    const commitResult = await atomic.commit();
+    if (!commitResult.ok) {
+      const latestDedupe = await kv.get<MessageDedupeRecord>(dedupeKeyValue);
+      if (latestDedupe.value) {
+        const existingRun = await kv.get<StoredRun>(runKey(latestDedupe.value.runId));
+        return {
+          runId: latestDedupe.value.runId,
+          conversationId: input.conversation.conversationId,
+          userMessageId: latestDedupe.value.messageId,
+          status: existingRun.value?.status ?? "queued",
+        };
+      }
+      throw new ApiError(409, "conversation_busy", "A run is already active for this conversation");
+    }
 
     createPendingRun(
       runId,
@@ -1149,7 +1229,6 @@ async function queueConversationRun(input: {
     };
     await saveRun(startedRun);
   } catch (error) {
-    activeRunByConversation.delete(input.conversation.conversationId);
     await failRunAndNotify(runId, "Failed to dispatch run to worker");
     throw error instanceof ApiError
       ? error
@@ -1324,11 +1403,16 @@ async function handleAgentSocket(req: Request): Promise<Response> {
         }
 
         await markAgentHeartbeat(connection);
+        const run = (await kv.get<StoredRun>(runKey(message.runId))).value;
+        if (!run) {
+          throw new ApiError(404, "run_not_found", "Run not found");
+        }
+        assertWorkerOwnsRun(connection, run);
         if (message.type === "response") {
-          await completeRunAndNotify(message);
+          await completeRunAndNotify(message, run);
           return;
         }
-        await failRunAndNotify(message.runId, message.error);
+        await failRunAndNotify(message.runId, message.error, "failed", run);
       } catch (error) {
         const apiError = error instanceof ApiError ? error : new ApiError(
           400,
