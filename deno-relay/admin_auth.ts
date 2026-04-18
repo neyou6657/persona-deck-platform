@@ -55,6 +55,31 @@ function expiryIso(hours: number): string {
   return new Date(Date.now() + hours * 60 * 60 * 1000).toISOString();
 }
 
+async function pbkdf2Sha256Hex(
+  password: string,
+  salt: string,
+  iterations: number,
+): Promise<string> {
+  const keyMaterial = await crypto.subtle.importKey(
+    "raw",
+    Uint8Array.from(textBytes(password)),
+    "PBKDF2",
+    false,
+    ["deriveBits"],
+  );
+  const derived = await crypto.subtle.deriveBits(
+    {
+      name: "PBKDF2",
+      hash: "SHA-256",
+      salt: Uint8Array.from(textBytes(salt)),
+      iterations,
+    },
+    keyMaterial,
+    256,
+  );
+  return [...new Uint8Array(derived)].map((item) => item.toString(16).padStart(2, "0")).join("");
+}
+
 function requireAuthEnabled(config: AdminAuthConfig): void {
   if (!config.enabled) {
     throw new AdminAuthError(
@@ -77,6 +102,15 @@ export async function verifyAdminPassword(
   config: AdminAuthConfig,
 ): Promise<boolean> {
   requireAuthEnabled(config);
+  if (config.passwordHash.startsWith("pbkdf2_sha256:")) {
+    const [, iterationsRaw, salt, expected] = config.passwordHash.split(":", 4);
+    const iterations = Number(iterationsRaw);
+    if (!Number.isFinite(iterations) || iterations < 1000 || !salt || !expected) {
+      throw new AdminAuthError(500, "invalid_admin_hash", "ADMIN_PASSWORD_HASH is malformed");
+    }
+    const candidate = await pbkdf2Sha256Hex(password, salt, iterations);
+    return timingSafeEqual(candidate, expected);
+  }
   const normalized = config.passwordHash.startsWith("sha256:")
     ? config.passwordHash.slice("sha256:".length)
     : config.passwordHash;

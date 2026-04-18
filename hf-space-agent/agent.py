@@ -7,8 +7,6 @@ import os
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import urlencode, urlsplit, urlunsplit
-
 import websockets
 from openai import AsyncOpenAI, OpenAIError
 
@@ -348,16 +346,6 @@ class AgentClient:
             oldest_key = next(iter(self._session_response_ids))
             del self._session_response_ids[oldest_key]
 
-
-def _append_secret_to_ws_url(url: str, secret: str) -> str:
-    parts = urlsplit(url)
-    query_items = []
-    if parts.query:
-        query_items.append(parts.query)
-    query_items.append(urlencode({"token": secret}))
-    return urlunsplit((parts.scheme, parts.netloc, parts.path, "&".join(query_items), parts.fragment))
-
-
 @dataclass
 class RelayBridge:
     agent_client: AgentClient
@@ -392,13 +380,13 @@ class RelayBridge:
                 await asyncio.sleep(self.reconnect_seconds)
                 continue
 
-            relay_url = _append_secret_to_ws_url(self.relay_ws_url, self.relay_secret)
             try:
                 async with websockets.connect(
-                    relay_url,
+                    self.relay_ws_url,
                     ping_interval=20,
                     ping_timeout=20,
                     max_size=4 * 1024 * 1024,
+                    additional_headers={"Authorization": f"Bearer {self.relay_secret}"},
                 ) as websocket:
                     self.connected = True
                     self.last_error = None

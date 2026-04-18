@@ -1278,6 +1278,7 @@ class PostgresControlPlaneStore implements ControlPlaneStore {
           completed_at::text as "completedAt"
         from runs
         where run_id = ${input.runId}::uuid
+        for update
         limit 1
       `;
       if (!run || isTerminalStatus(run.status)) {
@@ -1315,6 +1316,40 @@ class PostgresControlPlaneStore implements ControlPlaneStore {
       `;
 
       const assistantMessageId = crypto.randomUUID();
+      const [updatedRun] = await tx`
+        update runs
+        set
+          status = 'completed',
+          reply = ${input.reply},
+          response_id = ${input.responseId ?? null},
+          assistant_message_id = ${assistantMessageId}::uuid,
+          usage = ${toJson(input.usage)}::jsonb,
+          raw = ${toJson(input.raw)}::jsonb,
+          model = ${input.model ?? null},
+          completed_at = now()
+        where run_id = ${input.runId}::uuid
+          and status in ('queued', 'in_progress')
+        returning
+          run_id::text as "runId",
+          conversation_id::text as "conversationId",
+          persona_id as "personaId",
+          agent_instance_id as "agentInstanceId",
+          status,
+          prompt,
+          reply,
+          error,
+          usage,
+          raw,
+          model,
+          response_id as "responseId",
+          assistant_message_id::text as "assistantMessageId",
+          created_at::text as "createdAt",
+          completed_at::text as "completedAt"
+      `;
+      if (!updatedRun) {
+        return null;
+      }
+
       const [assistantMessage] = await tx`
         insert into messages (
           message_id,
@@ -1341,36 +1376,6 @@ class PostgresControlPlaneStore implements ControlPlaneStore {
           persona_id as "personaId",
           client_message_id as "clientMessageId",
           created_at::text as "createdAt"
-      `;
-
-      const [updatedRun] = await tx`
-        update runs
-        set
-          status = 'completed',
-          reply = ${input.reply},
-          response_id = ${input.responseId ?? null},
-          assistant_message_id = ${assistantMessageId}::uuid,
-          usage = ${toJson(input.usage)}::jsonb,
-          raw = ${toJson(input.raw)}::jsonb,
-          model = ${input.model ?? null},
-          completed_at = now()
-        where run_id = ${input.runId}::uuid
-        returning
-          run_id::text as "runId",
-          conversation_id::text as "conversationId",
-          persona_id as "personaId",
-          agent_instance_id as "agentInstanceId",
-          status,
-          prompt,
-          reply,
-          error,
-          usage,
-          raw,
-          model,
-          response_id as "responseId",
-          assistant_message_id::text as "assistantMessageId",
-          created_at::text as "createdAt",
-          completed_at::text as "completedAt"
       `;
 
       const [updatedConversation] = await tx`
@@ -1437,6 +1442,7 @@ class PostgresControlPlaneStore implements ControlPlaneStore {
           completed_at::text as "completedAt"
         from runs
         where run_id = ${runId}::uuid
+        for update
         limit 1
       `;
       if (!run) {
@@ -1452,6 +1458,7 @@ class PostgresControlPlaneStore implements ControlPlaneStore {
           error = ${error},
           completed_at = now()
         where run_id = ${runId}::uuid
+          and status in ('queued', 'in_progress')
         returning
           run_id::text as "runId",
           conversation_id::text as "conversationId",
@@ -1469,6 +1476,30 @@ class PostgresControlPlaneStore implements ControlPlaneStore {
           created_at::text as "createdAt",
           completed_at::text as "completedAt"
       `;
+      if (!updated) {
+        const [latest] = await tx`
+          select
+            run_id::text as "runId",
+            conversation_id::text as "conversationId",
+            persona_id as "personaId",
+            agent_instance_id as "agentInstanceId",
+            status,
+            prompt,
+            reply,
+            error,
+            usage,
+            raw,
+            model,
+            response_id as "responseId",
+            assistant_message_id::text as "assistantMessageId",
+            created_at::text as "createdAt",
+            completed_at::text as "completedAt"
+          from runs
+          where run_id = ${runId}::uuid
+          limit 1
+        `;
+        return latest ?? null;
+      }
 
       await tx`
         update conversation_states

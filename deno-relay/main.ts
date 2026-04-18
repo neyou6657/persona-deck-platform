@@ -113,7 +113,10 @@ const PERSONA_CATALOG_JSON = Deno.env.get("PERSONA_CATALOG_JSON") ?? "";
 const AGENT_SHARED_SECRET = Deno.env.get("AGENT_SHARED_SECRET")?.trim() ?? "";
 const AGENT_TOOL_SHARED_SECRET = Deno.env.get("AGENT_TOOL_SHARED_SECRET")?.trim() ||
   AGENT_SHARED_SECRET;
-const AGENT_REQUEST_TIMEOUT_MS = Number(Deno.env.get("AGENT_REQUEST_TIMEOUT_MS") ?? "90000");
+const parsedTimeoutMs = Number(Deno.env.get("AGENT_REQUEST_TIMEOUT_MS") ?? "90000");
+const AGENT_REQUEST_TIMEOUT_MS = Number.isFinite(parsedTimeoutMs) && parsedTimeoutMs > 0
+  ? parsedTimeoutMs
+  : 90000;
 const AGENT_TOKEN_PERSONAS_JSON = Deno.env.get("AGENT_TOKEN_PERSONAS_JSON") ?? "";
 const KNOWLEDGE_SEARCH_LIMIT = Math.max(
   1,
@@ -402,11 +405,6 @@ function parseAgentTokenPolicies(): Map<string, AllowedPersonaScope> {
 }
 
 function extractAgentToken(req: Request): string | null {
-  const url = new URL(req.url);
-  const queryToken = normalizeString(url.searchParams.get("token"));
-  if (queryToken) {
-    return queryToken;
-  }
   const auth = req.headers.get("authorization");
   if (auth?.startsWith("Bearer ")) {
     return auth.slice("Bearer ".length).trim() || null;

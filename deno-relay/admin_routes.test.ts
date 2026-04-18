@@ -13,7 +13,8 @@ Deno.test("admin login issues a bearer token and session endpoint accepts it", a
   const store = createMemoryControlPlaneStore();
   const config = {
     enabled: true,
-    passwordHash: "sha256:2bb80d537b1da3e38bd30361aa855686bde0eacd7162fef6a25fe97bf527a25b",
+    passwordHash:
+      "pbkdf2_sha256:210000:relay-salt:1701a688e9dbb3048375e5dbc12df9a8114d22d50637512dd9c4e5ab498bf4c3",
     sessionSecret: "secret-pepper",
     sessionTtlHours: 24,
   };
@@ -48,7 +49,8 @@ Deno.test("admin personas endpoint is protected", async () => {
   const store = createMemoryControlPlaneStore();
   const config = {
     enabled: true,
-    passwordHash: "sha256:2bb80d537b1da3e38bd30361aa855686bde0eacd7162fef6a25fe97bf527a25b",
+    passwordHash:
+      "pbkdf2_sha256:210000:relay-salt:1701a688e9dbb3048375e5dbc12df9a8114d22d50637512dd9c4e5ab498bf4c3",
     sessionSecret: "secret-pepper",
     sessionTtlHours: 24,
   };

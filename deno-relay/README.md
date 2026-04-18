@@ -36,7 +36,7 @@ Persona-aware Deno control plane for the multi-persona platform:
 - `AGENT_TOKEN_PERSONAS_JSON` optional token map such as `{"secret-a":["coder"],"secret-b":"*"}`
 - `AGENT_REQUEST_TIMEOUT_MS` default `90000`
 - `PERSONA_CATALOG_JSON` optional persona seed array
-- `ADMIN_PASSWORD_HASH` SHA-256 password hash, usually stored as `sha256:<hex>`
+- `ADMIN_PASSWORD_HASH` preferred format `pbkdf2_sha256:<iterations>:<salt>:<hex>`; legacy `sha256:<hex>` still works for migration only
 - `ADMIN_SESSION_SECRET` pepper used to hash admin bearer tokens before persistence
 - `ADMIN_SESSION_TTL_HOURS` admin session lifetime, default `24`
 - `KNOWLEDGE_SEARCH_LIMIT` default skill search limit
