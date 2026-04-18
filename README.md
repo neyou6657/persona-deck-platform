@@ -1,27 +1,25 @@
-# Multi-Persona Platform Workspace
+# Multi-Persona Agent Workspace
 
-This repository is becoming a three-part monorepo for a multi-persona chat system:
+This repository is the main public app repo for a multi-persona agent platform:
 
-- [`deno-relay`](/workspace/deno-relay): Deno control plane for worker registration, persona routing, conversation state, and client APIs
-- [`hf-space-agent`](/workspace/hf-space-agent): Hugging Face Space worker that connects outbound to Deno and serves one or more personas
-- [`android-client`](/workspace/android-client): Android app for persona switching, conversation lists, continue-last-chat, new chat, and message send/receive
+- [`deno-relay`](/workspace/deno-relay): Deno control plane for auth, persona routing, sessions, runs, and agent-facing knowledge APIs
+- [`hf-space-agent`](/workspace/hf-space-agent): Hugging Face outbound worker that connects to Deno and bootstraps public Codex skills at startup
+- [`android-client`](/workspace/android-client): Android client that talks to Deno, syncs personas, and handles persona chat UX
 
-## Architecture
+## Runtime Shape
 
-The intended production shape is:
+The production split is intentionally boring and therefore survivable:
 
-1. Android client calls the Deno control plane.
-2. Deno stores personas, conversations, messages, runs, and continuity state.
-3. Persona workers on Hugging Face connect outbound to Deno over authenticated WebSocket.
-4. Deno routes each run to the correct persona worker.
-5. Worker returns reply plus canonical continuity identifiers so the same conversation can continue later.
+1. Android talks to Deno.
+2. Deno owns durable state and the knowledge gateway.
+3. Hugging Face workers connect outbound to Deno and do execution only.
+4. Public Codex skills are published in a separate public GitHub repo and pulled into `~/.codex/skills` during HF startup.
 
-## Key Rules
+## Public Repo Split
 
-- Hugging Face Spaces are treated as ephemeral workers, not as durable storage.
-- Conversation continuity belongs to the backend, not to HF Space memory.
-- One conversation belongs to one persona in Phase 1.
-- Android Phase 1 uses polling by `runId`, not streaming.
+- Main public repo: Deno relay + HF worker + Android app + GitHub Actions
+- Skills public repo: Codex skills only, published separately so HF startup can pull a small archive into `~/.codex/skills`
+- Runtime secrets: stay in Deno Deploy, Hugging Face Space secrets, or GitHub Actions secrets; they do not belong in git unless your hobby is self-sabotage
 
 ## Docs
 
@@ -30,6 +28,6 @@ The intended production shape is:
 
 ## Package Notes
 
-- [`deno-relay/README.md`](/workspace/deno-relay/README.md) tracks the relay protocol and deployment notes.
-- [`hf-space-agent/README.md`](/workspace/hf-space-agent/README.md) tracks worker runtime and environment variables.
-- [`android-client/`](/workspace/android-client) contains the Phase 1 Compose scaffold and fake repository wiring.
+- [`deno-relay/README.md`](/workspace/deno-relay/README.md) will track PostgreSQL, admin auth, and knowledge routing
+- [`hf-space-agent/README.md`](/workspace/hf-space-agent/README.md) tracks worker runtime, startup sync, and relay wiring
+- [`android-client/`](/workspace/android-client) is being reshaped into a server-backed client rather than a fake local demo

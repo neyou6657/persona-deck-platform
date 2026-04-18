@@ -1,6 +1,8 @@
 .cc-connect/
+.android-sdk/
 .deno/
 .deno.zip
+.tools/
 __pycache__/
 *.pyc
 *.pyo
@@ -14,6 +16,8 @@ __pycache__/
 # Local virtualenvs
 .venv/
 venv/
+hf-space-agent/.venv/
+hf-space-agent/__pycache__/
 
 # Node / frontend
 node_modules/
@@ -22,6 +26,7 @@ build/
 .gradle/
 .idea/
 local.properties
+android-client/local.properties
 
 # Python / generated outputs
 generated/
@@ -36,4 +41,3 @@ CF-Workers-CheckProxyIP/
 # Worktree storage
 .worktrees/
 worktrees/
-
