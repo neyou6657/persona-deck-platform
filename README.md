@@ -32,3 +32,32 @@ The production split is intentionally boring and therefore survivable:
 - [`hf-space-agent/README.md`](hf-space-agent/README.md) tracks worker runtime, startup sync, relay wiring, and environment variables
 - [`android-client/`](android-client) contains the RikkaHub-based client shell for Deno-backed persona sync, thread browsing, and chat
 - [`.github/workflows/android-preview.yml`](.github/workflows/android-preview.yml) builds a preview APK plus the larger Android artifact on GitHub Actions
+
+## Example: Add A Graduate Persona Agent
+
+Example target:
+
+- `personaId`: `grad-student`
+- `displayName`: `研究生`
+
+Steps:
+
+1. Open the Deno admin page, log in, create a persona with `personaId=grad-student` and `displayName=研究生`.
+2. In the same admin page, add this persona's knowledge docs so Deno owns the knowledge instead of the HF Space.
+3. Deploy one dedicated HF Space worker with:
+
+```env
+AGENT_ID=hf-space-grad-student-v1
+AGENT_PERSONA_IDS=grad-student
+DENO_AGENT_WS_URL=wss://your-deno-domain/agent
+DENO_AGENT_SHARED_SECRET=your_worker_secret
+AGENT_RUNTIME=responses
+AGENT_MODEL=gpt-5.3-codex
+AGENT_API_BASE_URL=https://your-openai-compatible-endpoint/v1
+AGENT_API_KEY=your_api_key
+DENO_KNOWLEDGE_BASE_URL=https://your-deno-domain
+DENO_KNOWLEDGE_SHARED_SECRET=your_knowledge_secret
+```
+
+4. After the worker connects, the Deno admin page should show `grad-student` as online.
+5. Sync personas in the client, open `研究生`, then continue old chats or start a new one.
