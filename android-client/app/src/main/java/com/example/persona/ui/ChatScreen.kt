@@ -2,25 +2,32 @@ package com.example.persona.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material3.Button
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextField
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 
 @Composable
@@ -34,82 +41,136 @@ fun ChatScreen(
 ) {
     var input by rememberSaveable { mutableStateOf("") }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(
-                brush = Brush.verticalGradient(
-                    listOf(Color(0xFF1C2338), Color(0xFF254E70), Color(0xFFE8F4FF)),
-                ),
-            ),
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+    DeckBackground {
+        Column(
+            modifier = Modifier.fillMaxSize(),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            Button(onClick = onBack) { Text("Back") }
-            Text(
-                text = title,
-                modifier = Modifier.padding(top = 10.dp),
-                color = Color.White,
-            )
-        }
-
-        Text(
-            text = "Conversation: $conversationId",
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-            color = Color.White.copy(alpha = 0.92f),
-        )
-
-        LazyColumn(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            items(messages, key = { it.id }) { message ->
-                val bubbleColor = if (message.role == "assistant") Color(0xFFE8EBFF) else Color(0xFFDCF4E3)
-                Text(
-                    text = "${message.role}: ${message.content}",
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(bubbleColor, shape = RoundedCornerShape(14.dp))
-                        .padding(12.dp),
-                )
-            }
-        }
-
-        Text(
-            text = "Run status: $pollingStatus",
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-            color = Color.White.copy(alpha = 0.92f),
-        )
-
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(12.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            TextField(
-                value = input,
-                onValueChange = { input = it },
-                modifier = Modifier.weight(1f),
-                placeholder = { Text("Type a message") },
-            )
-            Button(
-                onClick = {
-                    val trimmed = input.trim()
-                    if (trimmed.isNotEmpty()) {
-                        onSendMessage(trimmed)
-                        input = ""
+            DeckPanel {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.Top,
+                    ) {
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            DeckBadge(
+                                text = formatRunStatusLabel(pollingStatus),
+                                tone = runStatusTone(pollingStatus),
+                            )
+                            Text(
+                                text = title,
+                                style = MaterialTheme.typography.headlineSmall,
+                                fontWeight = FontWeight.Black,
+                            )
+                            Text(
+                                text = "会话 ID：$conversationId",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        OutlinedButton(onClick = onBack) {
+                            Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = null)
+                            Text(
+                                text = "返回",
+                                modifier = Modifier.padding(start = 8.dp),
+                            )
+                        }
                     }
-                },
+                }
+            }
+
+            DeckPanel(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth(),
             ) {
-                Text("Send")
+                if (messages.isEmpty()) {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = "这里还没有消息。发一句试试，别让聊天页像空城。",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        items(messages, key = { it.id }) { message ->
+                            val assistant = message.role == "assistant"
+                            val bubbleColor = if (assistant) {
+                                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.84f)
+                            } else {
+                                MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.84f)
+                            }
+                            Column(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalAlignment = if (assistant) Alignment.Start else Alignment.End,
+                            ) {
+                                Text(
+                                    text = if (assistant) "Agent" else "You",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
+                                )
+                                Text(
+                                    text = message.content,
+                                    modifier = Modifier
+                                        .background(
+                                            color = bubbleColor,
+                                            shape = RoundedCornerShape(
+                                                topStart = 24.dp,
+                                                topEnd = 24.dp,
+                                                bottomStart = if (assistant) 8.dp else 24.dp,
+                                                bottomEnd = if (assistant) 24.dp else 8.dp,
+                                            ),
+                                        )
+                                        .padding(16.dp),
+                                    style = MaterialTheme.typography.bodyLarge,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            DeckPanel {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.Bottom,
+                ) {
+                    OutlinedTextField(
+                        value = input,
+                        onValueChange = { input = it },
+                        modifier = Modifier.weight(1f),
+                        label = { Text("给人格下个指令") },
+                        placeholder = { Text("例如：继续刚才那件事，顺手总结一下") },
+                        minLines = 3,
+                        maxLines = 5,
+                    )
+                    Button(
+                        onClick = {
+                            val trimmed = input.trim()
+                            if (trimmed.isNotEmpty()) {
+                                onSendMessage(trimmed)
+                                input = ""
+                            }
+                        },
+                    ) {
+                        Icon(Icons.AutoMirrored.Outlined.Send, contentDescription = null)
+                        Text(
+                            text = "发送",
+                            modifier = Modifier.padding(start = 8.dp),
+                        )
+                    }
+                }
             }
         }
     }

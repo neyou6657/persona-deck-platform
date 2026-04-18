@@ -3,7 +3,6 @@ package com.example.persona
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -34,6 +33,7 @@ import com.example.persona.ui.ChatScreen
 import com.example.persona.ui.ConversationListScreen
 import com.example.persona.ui.MessageUiModel
 import com.example.persona.ui.PersonaEditScreen
+import com.example.persona.ui.PersonaDeckTheme
 import com.example.persona.ui.PersonaHomeScreen
 import com.example.persona.ui.ServerSettingsScreen
 import kotlinx.coroutines.launch
@@ -43,7 +43,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            MaterialTheme {
+            PersonaDeckTheme {
                 PersonaClientApp()
             }
         }
@@ -117,6 +117,8 @@ private fun PersonaClientApp() {
         composable(Routes.Home) {
             PersonaHomeScreen(
                 personas = personas,
+                personaProfiles = personaProfiles,
+                serverConfig = serverConfig,
                 statusText = statusText,
                 onContinueLast = { personaId ->
                     scope.launch {
@@ -189,6 +191,20 @@ private fun PersonaClientApp() {
                     serverConfigStore.save(serverConfig)
                     statusText = "Saved server config for user ${serverConfig.userId}"
                     navController.popBackStack()
+                },
+                onTestConnection = { candidate ->
+                    try {
+                        val sanitized = sanitizeConfig(candidate)
+                        val previewApi = if (sanitized.isConfigured()) {
+                            RemotePersonaApi { sanitized }
+                        } else {
+                            FakePersonaApi()
+                        }
+                        val count = previewApi.listPersonas().size
+                        "连接成功，当前可见人格 $count 个。"
+                    } catch (error: Exception) {
+                        "连接失败：${error.message ?: "unknown error"}"
+                    }
                 },
                 onBack = { navController.popBackStack() },
             )

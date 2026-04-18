@@ -32,4 +32,5 @@ The intended production shape is:
 
 - [`deno-relay/README.md`](/workspace/deno-relay/README.md) tracks the relay protocol and deployment notes.
 - [`hf-space-agent/README.md`](/workspace/hf-space-agent/README.md) tracks worker runtime and environment variables.
-- [`android-client/`](/workspace/android-client) contains the Phase 1 Compose scaffold and fake repository wiring.
+- [`android-client/`](/workspace/android-client) contains the RikkaHub-inspired Compose client shell for Deno-backed persona sync, thread browsing, and chat.
+- [`.github/workflows/android-preview.yml`](/workspace/.worktrees/rollout-android-rikkahub/.github/workflows/android-preview.yml) builds a preview APK plus a larger build-pack artifact on GitHub Actions.
