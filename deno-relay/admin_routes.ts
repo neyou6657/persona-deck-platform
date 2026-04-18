@@ -65,6 +65,29 @@ function authConfig(options: AdminRouteOptions): AdminAuthConfig {
   return options.config ?? createAdminAuthConfigFromEnv();
 }
 
+const parsedOnlineTtlMs = Number(Deno.env.get("AGENT_ONLINE_TTL_MS") ?? "120000");
+const AGENT_ONLINE_TTL_MS = Number.isFinite(parsedOnlineTtlMs) && parsedOnlineTtlMs > 0
+  ? parsedOnlineTtlMs
+  : 120000;
+
+function parseTimestampMs(value: string | null | undefined): number {
+  if (!value) {
+    return 0;
+  }
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function normalizeAgentInstances(records: Awaited<ReturnType<ControlPlaneStore["listAgentInstances"]>>) {
+  return records.map((record) => ({
+    ...record,
+    status: record.status === "online" &&
+        Date.now() - parseTimestampMs(record.lastHeartbeatAt) <= AGENT_ONLINE_TTL_MS
+      ? "online"
+      : "offline",
+  }));
+}
+
 function routeError(error: unknown): Response {
   if (error instanceof AdminRouteError) {
     return json({ error: error.code, message: error.message }, error.status);
@@ -121,9 +144,10 @@ export async function handleAdminRequest(
     }
 
     if (url.pathname === "/v1/admin/personas" && req.method === "GET") {
+      const agentInstances = normalizeAgentInstances(await options.store.listAgentInstances());
       return json({
         personas: await options.store.listPersonas(),
-        agentInstances: await options.store.listAgentInstances(),
+        agentInstances,
       });
     }
 

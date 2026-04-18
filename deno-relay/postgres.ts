@@ -112,13 +112,25 @@ export type QueueRunInput = {
   userId: string;
   text: string;
   clientMessageId: string;
-  assignedAgentInstanceId: string;
+  assignedAgentInstanceId: string | null;
+  requestRaw?: unknown;
 };
 
 export type QueueRunResult = {
   deduped: boolean;
   run: StoredRun;
   userMessageId: string;
+  previousResponseId: string | null;
+};
+
+export type ClaimRunInput = {
+  instanceId: string;
+  agentId: string;
+  personaIds: string[];
+};
+
+export type ClaimRunResult = {
+  run: StoredRun;
   previousResponseId: string | null;
 };
 
@@ -158,6 +170,7 @@ export type ControlPlaneStore = {
   listMessages(conversationId: string): Promise<MessageRecord[]>;
   getConversationState(conversationId: string): Promise<ConversationStateRecord | null>;
   queueRun(input: QueueRunInput): Promise<QueueRunResult>;
+  claimQueuedRun(input: ClaimRunInput): Promise<ClaimRunResult | null>;
   markRunInProgress(runId: string): Promise<void>;
   getRun(runId: string): Promise<StoredRun | null>;
   getRunOwned(userId: string, runId: string): Promise<StoredRun | null>;
@@ -259,6 +272,37 @@ function normalizeMetadata(value: unknown): JsonObject {
     return value as JsonObject;
   }
   return {};
+}
+
+function normalizeStringArrayValue(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+  }
+  if (typeof value === "string" && value.trim()) {
+    try {
+      const parsed = JSON.parse(value);
+      if (Array.isArray(parsed)) {
+        return parsed.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+      }
+    } catch {
+      // Fall through and treat as a single string value.
+    }
+    return [value];
+  }
+  return [];
+}
+
+function normalizeAgentInstanceRecord(
+  row: Omit<AgentInstanceRecord, "personaIds" | "capabilities"> & {
+    personaIds: unknown;
+    capabilities: unknown;
+  },
+): AgentInstanceRecord {
+  return {
+    ...row,
+    personaIds: normalizeStringArrayValue(row.personaIds),
+    capabilities: normalizeMetadata(row.capabilities),
+  };
 }
 
 function toJson(value: unknown): string {
@@ -453,6 +497,7 @@ class MemoryControlPlaneStore implements ControlPlaneStore {
       agentInstanceId: input.assignedAgentInstanceId,
       status: "queued",
       prompt: input.text,
+      raw: input.requestRaw,
       createdAt,
     };
     const conversation: ConversationRecord = {
@@ -493,6 +538,34 @@ class MemoryControlPlaneStore implements ControlPlaneStore {
       return;
     }
     this.runs.set(runId, { ...run, status: "in_progress" });
+  }
+
+  async claimQueuedRun(input: ClaimRunInput): Promise<ClaimRunResult | null> {
+    if (!input.personaIds.length) {
+      return null;
+    }
+    const candidate = [...this.runs.values()]
+      .filter((run) =>
+        run.status === "queued" &&
+        input.personaIds.includes(run.personaId) &&
+        (run.agentInstanceId === null || run.agentInstanceId === input.instanceId)
+      )
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt))[0];
+    if (!candidate) {
+      return null;
+    }
+
+    const claimed: StoredRun = {
+      ...candidate,
+      status: "in_progress",
+      agentInstanceId: input.instanceId,
+    };
+    this.runs.set(candidate.runId, claimed);
+    return {
+      run: claimed,
+      previousResponseId: this.conversationStates.get(candidate.conversationId)?.previousResponseId ??
+        null,
+    };
   }
 
   async getRun(runId: string): Promise<StoredRun | null> {
@@ -1076,6 +1149,7 @@ class PostgresControlPlaneStore implements ControlPlaneStore {
             agent_instance_id,
             status,
             prompt,
+            raw,
             created_at
           ) values (
             ${runId}::uuid,
@@ -1084,6 +1158,7 @@ class PostgresControlPlaneStore implements ControlPlaneStore {
             ${input.assignedAgentInstanceId},
             'queued',
             ${input.text},
+            ${toJson(input.requestRaw)}::jsonb,
             now()
           )
           returning
@@ -1199,6 +1274,83 @@ class PostgresControlPlaneStore implements ControlPlaneStore {
       where run_id = ${runId}::uuid
         and status = 'queued'
     `;
+  }
+
+  async claimQueuedRun(input: ClaimRunInput): Promise<ClaimRunResult | null> {
+    if (!input.personaIds.length) {
+      return null;
+    }
+    return await this.sql.begin(async (tx: any) => {
+      const [run] = await tx`
+        select
+          run_id::text as "runId",
+          conversation_id::text as "conversationId",
+          persona_id as "personaId",
+          agent_instance_id as "agentInstanceId",
+          status,
+          prompt,
+          reply,
+          error,
+          usage,
+          raw,
+          model,
+          response_id as "responseId",
+          assistant_message_id::text as "assistantMessageId",
+          created_at::text as "createdAt",
+          completed_at::text as "completedAt"
+        from runs
+        where status = 'queued'
+          and persona_id in ${tx(input.personaIds)}
+          and (agent_instance_id is null or agent_instance_id = ${input.instanceId})
+        order by created_at asc
+        for update skip locked
+        limit 1
+      `;
+      if (!run) {
+        return null;
+      }
+
+      const [state] = await tx`
+        select
+          previous_response_id as "previousResponseId"
+        from conversation_states
+        where conversation_id = ${run.conversationId}::uuid
+        limit 1
+      `;
+
+      const [claimed] = await tx`
+        update runs
+        set
+          status = 'in_progress',
+          agent_instance_id = ${input.instanceId}
+        where run_id = ${run.runId}::uuid
+          and status = 'queued'
+        returning
+          run_id::text as "runId",
+          conversation_id::text as "conversationId",
+          persona_id as "personaId",
+          agent_instance_id as "agentInstanceId",
+          status,
+          prompt,
+          reply,
+          error,
+          usage,
+          raw,
+          model,
+          response_id as "responseId",
+          assistant_message_id::text as "assistantMessageId",
+          created_at::text as "createdAt",
+          completed_at::text as "completedAt"
+      `;
+      if (!claimed) {
+        return null;
+      }
+
+      return {
+        run: claimed,
+        previousResponseId: state?.previousResponseId ?? null,
+      };
+    });
   }
 
   async getRun(runId: string): Promise<StoredRun | null> {
@@ -1573,7 +1725,7 @@ class PostgresControlPlaneStore implements ControlPlaneStore {
   }
 
   async listAgentInstances(): Promise<AgentInstanceRecord[]> {
-    return await this.sql`
+    const rows = await this.sql`
       select
         instance_id as "instanceId",
         agent_id as "agentId",
@@ -1588,6 +1740,7 @@ class PostgresControlPlaneStore implements ControlPlaneStore {
       from agent_instances
       order by last_heartbeat_at desc
     `;
+    return rows.map(normalizeAgentInstanceRecord);
   }
 
   async listKnowledgeDocs(personaId: string, limit: number): Promise<KnowledgeDocRecord[]> {

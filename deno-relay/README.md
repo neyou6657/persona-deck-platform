@@ -9,7 +9,8 @@ Persona-aware Deno control plane for the multi-persona platform:
 ## Endpoints
 
 - `GET /healthz`
-- `GET /`
+- `GET /` admin web UI
+- `GET /api-docs` JSON route summary
 - `GET /ws`
 - `GET /agent`
 - `GET /v1/personas`
@@ -116,4 +117,4 @@ deno task check
 deno task start
 ```
 
-Before production startup, apply [`sql/001_control_plane_pg.sql`](/workspace/.worktrees/rollout-deno-pg/deno-relay/sql/001_control_plane_pg.sql) to PostgreSQL. KV has retired; it served, it saluted, it went home.
+Before production startup, apply [`sql/001_control_plane_pg.sql`](/workspace/.worktrees/rollout-meta/deno-relay/sql/001_control_plane_pg.sql) to PostgreSQL. KV has retired; it served, it saluted, it went home.

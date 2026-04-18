@@ -54,6 +54,59 @@ Deno.test("queueRun dedupes the same client message id", async () => {
   await store.close();
 });
 
+Deno.test("claimQueuedRun lets a polling worker take an unassigned queued run", async () => {
+  const store = createMemoryControlPlaneStore();
+  const conversation = await store.createConversation("u1", "coder");
+  const queued = await store.queueRun({
+    conversation,
+    userId: "u1",
+    text: "ship the fix",
+    clientMessageId: "m-claim-1",
+    assignedAgentInstanceId: null,
+  });
+
+  const claimed = await store.claimQueuedRun({
+    instanceId: "worker-1",
+    agentId: "hf-space-coder-v1",
+    personaIds: ["coder"],
+  });
+
+  assertEquals(claimed?.run.runId, queued.run.runId);
+  assertEquals(claimed?.run.status, "in_progress");
+  assertEquals(claimed?.run.agentInstanceId, "worker-1");
+  assertEquals(claimed?.previousResponseId, null);
+  assertEquals((await store.getRun(queued.run.runId))?.status, "in_progress");
+  await store.close();
+});
+
+Deno.test("claimQueuedRun skips runs reserved for another worker instance", async () => {
+  const store = createMemoryControlPlaneStore();
+  const conversation = await store.createConversation("u1", "coder");
+  const queued = await store.queueRun({
+    conversation,
+    userId: "u1",
+    text: "only the target worker should get this",
+    clientMessageId: "m-claim-2",
+    assignedAgentInstanceId: "worker-target",
+  });
+
+  const skipped = await store.claimQueuedRun({
+    instanceId: "worker-other",
+    agentId: "hf-space-coder-v1",
+    personaIds: ["coder"],
+  });
+  const claimed = await store.claimQueuedRun({
+    instanceId: "worker-target",
+    agentId: "hf-space-coder-v1",
+    personaIds: ["coder"],
+  });
+
+  assertEquals(skipped, null);
+  assertEquals(claimed?.run.runId, queued.run.runId);
+  assertEquals(claimed?.run.agentInstanceId, "worker-target");
+  await store.close();
+});
+
 Deno.test("queueRun rejects a second active run for the same conversation", async () => {
   const store = createMemoryControlPlaneStore();
   const conversation = await store.createConversation("u1", "coder");

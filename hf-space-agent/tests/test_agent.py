@@ -318,6 +318,53 @@ class AgentClientTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["reply"], "relay path verified")
 
+    async def test_poll_once_claims_a_run_and_posts_the_response(self):
+        fake_client = _FakeGeneratingClient()
+        bridge = RelayBridge(
+            agent_client=fake_client,
+            relay_ws_url="https://relay.example",
+            relay_secret="secret",
+            reconnect_seconds=1,
+        )
+        requests = []
+
+        async def fake_request(method, path, payload=None):
+            requests.append((method, path, payload))
+            if path == "/v1/worker/claim":
+                return {
+                    "type": "prompt",
+                    "runId": "run-123",
+                    "conversationId": "conv-456",
+                    "personaId": "coder",
+                    "prompt": "write tests please",
+                    "sessionId": "conv-456",
+                    "continuity": {"previousResponseId": "resp-older"},
+                    "metadata": {"client": "android"},
+                }
+            if path == "/v1/worker/runs/run-123/response":
+                return {"ok": True}
+            raise AssertionError(f"unexpected path: {path}")
+
+        bridge._request_json = fake_request
+
+        handled = await bridge._poll_once()
+
+        self.assertTrue(handled)
+        self.assertEqual(
+            fake_client.calls,
+            [
+                {
+                    "prompt": "write tests please",
+                    "session_id": "conv-456",
+                    "metadata": {"client": "android"},
+                    "previous_response_id": "resp-older",
+                }
+            ],
+        )
+        self.assertEqual(requests[0][0:2], ("POST", "/v1/worker/claim"))
+        self.assertEqual(requests[1][0:2], ("POST", "/v1/worker/runs/run-123/response"))
+        self.assertEqual(requests[1][2]["reply"], "protocol reply")
+
     async def test_relay_prompt_protocol_uses_run_id_persona_and_continuity(self):
         fake_client = _FakeGeneratingClient()
         bridge = RelayBridge(

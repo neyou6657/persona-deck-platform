@@ -6,6 +6,7 @@ import {
   type WorkerRegistration,
 } from "./domain.ts";
 import { handleAdminRequest } from "./admin_routes.ts";
+import { buildApiDocsPayload, renderAdminPage } from "./admin_ui.ts";
 import {
   createPostgresControlPlaneStore,
   type AgentInstanceRecord,
@@ -94,6 +95,38 @@ type PendingRun = {
   timeoutId: ReturnType<typeof setTimeout>;
 };
 
+type WorkerPollRegistration = {
+  agentId: string;
+  instanceId: string;
+  personaIds: string[];
+  capabilities: JsonObject;
+  version?: string;
+};
+
+type WorkerRunResponseRequest = {
+  instanceId: string;
+  conversationId?: string;
+  personaId?: string;
+  reply: string;
+  responseId?: string | null;
+  model?: string;
+  usage?: unknown;
+  raw?: unknown;
+};
+
+type WorkerRunErrorRequest = {
+  instanceId: string;
+  conversationId?: string;
+  personaId?: string;
+  error: string;
+};
+
+type QueuedRequestContext = {
+  sessionId: string | null;
+  metadata: JsonObject;
+  requestedAgentId: string | null;
+};
+
 class ApiError extends Error {
   status: number;
   code: string;
@@ -117,6 +150,10 @@ const parsedTimeoutMs = Number(Deno.env.get("AGENT_REQUEST_TIMEOUT_MS") ?? "9000
 const AGENT_REQUEST_TIMEOUT_MS = Number.isFinite(parsedTimeoutMs) && parsedTimeoutMs > 0
   ? parsedTimeoutMs
   : 90000;
+const parsedOnlineTtlMs = Number(Deno.env.get("AGENT_ONLINE_TTL_MS") ?? "120000");
+const AGENT_ONLINE_TTL_MS = Number.isFinite(parsedOnlineTtlMs) && parsedOnlineTtlMs > 0
+  ? parsedOnlineTtlMs
+  : 120000;
 const AGENT_TOKEN_PERSONAS_JSON = Deno.env.get("AGENT_TOKEN_PERSONAS_JSON") ?? "";
 const KNOWLEDGE_SEARCH_LIMIT = Math.max(
   1,
@@ -432,6 +469,53 @@ function arePersonasAllowed(scope: AllowedPersonaScope, personaIds: string[]): b
   return personaIds.every((personaId) => isPersonaAllowed(scope, personaId));
 }
 
+function parseWorkerPollRegistration(value: JsonObject): WorkerPollRegistration {
+  const agentId = normalizeString(value.agentId);
+  const instanceId = normalizeString(value.instanceId);
+  if (!agentId || !instanceId) {
+    throw new ApiError(400, "invalid_request", "agentId and instanceId are required");
+  }
+  return {
+    agentId,
+    instanceId,
+    personaIds: parseStringArray(value.personaIds, "personaIds"),
+    capabilities: normalizeJsonObject(value.capabilities),
+    version: normalizeString(value.version) ?? undefined,
+  };
+}
+
+function parseWorkerRunResponse(value: JsonObject): WorkerRunResponseRequest {
+  const instanceId = normalizeString(value.instanceId);
+  const reply = normalizeString(value.reply);
+  if (!instanceId || !reply) {
+    throw new ApiError(400, "invalid_request", "instanceId and reply are required");
+  }
+  return {
+    instanceId,
+    conversationId: normalizeString(value.conversationId) ?? undefined,
+    personaId: normalizeString(value.personaId) ?? undefined,
+    reply,
+    responseId: normalizeString(value.responseId),
+    model: normalizeString(value.model) ?? undefined,
+    usage: value.usage,
+    raw: value.raw,
+  };
+}
+
+function parseWorkerRunError(value: JsonObject): WorkerRunErrorRequest {
+  const instanceId = normalizeString(value.instanceId);
+  const error = normalizeString(value.error);
+  if (!instanceId || !error) {
+    throw new ApiError(400, "invalid_request", "instanceId and error are required");
+  }
+  return {
+    instanceId,
+    conversationId: normalizeString(value.conversationId) ?? undefined,
+    personaId: normalizeString(value.personaId) ?? undefined,
+    error,
+  };
+}
+
 function buildAgentInstanceRecord(connection: AgentConnection): AgentInstanceRecord | null {
   if (!connection.worker) {
     return null;
@@ -461,12 +545,86 @@ function mapStoreError(error: unknown): never {
 }
 
 async function listPersonas(): Promise<Array<JsonObject>> {
+  const onlineCounts = await buildFreshWorkerCountsByPersona();
   const personas = await store.listPersonas();
   return personas.map((persona) => ({
     ...persona,
-    online: (workerRegistry.personaBuckets.get(persona.personaId) ?? []).length > 0,
-    connectedWorkers: (workerRegistry.personaBuckets.get(persona.personaId) ?? []).length,
+    online: (onlineCounts.get(persona.personaId) ?? 0) > 0,
+    connectedWorkers: onlineCounts.get(persona.personaId) ?? 0,
   }));
+}
+
+function parseTimestampMs(value: string | null | undefined): number {
+  if (!value) {
+    return 0;
+  }
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function isAgentInstanceFresh(record: AgentInstanceRecord): boolean {
+  return record.status === "online" &&
+    Date.now() - parseTimestampMs(record.lastHeartbeatAt) <= AGENT_ONLINE_TTL_MS;
+}
+
+async function listFreshAgentInstances(): Promise<AgentInstanceRecord[]> {
+  return (await store.listAgentInstances()).filter(isAgentInstanceFresh);
+}
+
+async function buildFreshWorkerCountsByPersona(): Promise<Map<string, number>> {
+  const counts = new Map<string, number>();
+  for (const record of await listFreshAgentInstances()) {
+    for (const personaId of record.personaIds) {
+      counts.set(personaId, (counts.get(personaId) ?? 0) + 1);
+    }
+  }
+  return counts;
+}
+
+async function pickFreshAgentInstance(
+  personaId: string,
+  agentId?: string,
+): Promise<AgentInstanceRecord | null> {
+  for (const record of await listFreshAgentInstances()) {
+    if (!record.personaIds.includes(personaId)) {
+      continue;
+    }
+    if (agentId && record.agentId !== agentId) {
+      continue;
+    }
+    return record;
+  }
+  return null;
+}
+
+function buildQueuedRequestRaw(
+  sessionId: string | null | undefined,
+  metadata: JsonObject,
+  requestedAgentId?: string,
+): JsonObject {
+  return {
+    relayRequest: {
+      sessionId: sessionId ?? null,
+      metadata,
+      requestedAgentId: requestedAgentId ?? null,
+    },
+  };
+}
+
+function parseQueuedRequestContext(raw: unknown, fallbackSessionId: string): QueuedRequestContext {
+  const envelope = normalizeJsonObject(raw);
+  const relayRequest = normalizeJsonObject(envelope.relayRequest);
+  return {
+    sessionId: normalizeString(relayRequest.sessionId) ?? fallbackSessionId,
+    metadata: normalizeJsonObject(relayRequest.metadata),
+    requestedAgentId: normalizeString(relayRequest.requestedAgentId),
+  };
+}
+
+function assertRunOwnedByInstance(instanceId: string, run: StoredRun): void {
+  if (!run.agentInstanceId || run.agentInstanceId !== instanceId) {
+    throw new ApiError(409, "run_not_owned_by_worker", "Run is assigned to a different worker");
+  }
 }
 
 function pickLiveWorkerConnection(personaId: string, agentId?: string): AgentConnection | null {
@@ -612,9 +770,7 @@ function assertWorkerOwnsRun(connection: AgentConnection, run: StoredRun): void 
   if (!connection.worker) {
     throw new ApiError(400, "worker_not_registered", "Worker must register before sending run updates");
   }
-  if (!run.agentInstanceId || run.agentInstanceId !== connection.worker.instanceId) {
-    throw new ApiError(409, "run_not_owned_by_worker", "Run is assigned to a different worker");
-  }
+  assertRunOwnedByInstance(connection.worker.instanceId, run);
 }
 
 async function queueConversationRun(input: {
@@ -628,7 +784,10 @@ async function queueConversationRun(input: {
   clientSocket?: WebSocket | null;
 }): Promise<{ runId: string; conversationId: string; userMessageId: string; status: RunStatus }> {
   const workerConnection = pickLiveWorkerConnection(input.conversation.personaId, input.agentId);
-  if (!workerConnection?.worker) {
+  const persistedWorker = workerConnection?.worker
+    ? null
+    : await pickFreshAgentInstance(input.conversation.personaId, input.agentId);
+  if (!workerConnection?.worker && !persistedWorker) {
     throw new ApiError(503, "persona_unavailable", "No worker is available for this persona");
   }
 
@@ -639,7 +798,16 @@ async function queueConversationRun(input: {
       userId: input.userId,
       text: input.text,
       clientMessageId: input.clientMessageId,
-      assignedAgentInstanceId: workerConnection.worker.instanceId,
+      assignedAgentInstanceId: workerConnection?.worker?.instanceId ??
+        (input.agentId ? persistedWorker?.instanceId ?? null : null),
+      requestRaw: buildQueuedRequestRaw(
+        input.sessionId ?? input.conversation.conversationId,
+        {
+          ...input.metadata,
+          clientMessageId: input.clientMessageId,
+        },
+        input.agentId,
+      ),
     });
   } catch (error) {
     mapStoreError(error);
@@ -654,6 +822,19 @@ async function queueConversationRun(input: {
     };
   }
 
+  if (!workerConnection?.worker) {
+    return {
+      runId: queued.run.runId,
+      conversationId: queued.run.conversationId,
+      userMessageId: queued.userMessageId,
+      status: queued.run.status,
+    };
+  }
+
+  const requestContext = parseQueuedRequestContext(
+    queued.run.raw,
+    input.sessionId ?? queued.run.conversationId,
+  );
   try {
     createPendingRun(
       queued.run.runId,
@@ -667,14 +848,11 @@ async function queueConversationRun(input: {
       conversationId: queued.run.conversationId,
       personaId: queued.run.personaId,
       prompt: input.text,
-      sessionId: input.sessionId ?? queued.run.conversationId,
+      sessionId: requestContext.sessionId ?? queued.run.conversationId,
       continuity: {
         previousResponseId: queued.previousResponseId,
       },
-      metadata: {
-        ...input.metadata,
-        clientMessageId: input.clientMessageId,
-      },
+      metadata: requestContext.metadata,
     });
     await store.markRunInProgress(queued.run.runId);
   } catch {
@@ -688,6 +866,42 @@ async function queueConversationRun(input: {
     userMessageId: queued.userMessageId,
     status: "queued",
   };
+}
+
+async function savePolledWorkerPresence(registration: WorkerPollRegistration): Promise<void> {
+  const existing = (await store.listAgentInstances()).find((item) =>
+    item.instanceId === registration.instanceId
+  );
+  const lastHeartbeatAt = nowIso();
+  await Promise.all([
+    ...registration.personaIds.map((personaId) => store.ensurePersonaRecord(personaId)),
+    store.saveAgentInstance({
+      instanceId: registration.instanceId,
+      agentId: registration.agentId,
+      personaIds: registration.personaIds,
+      capabilities: registration.capabilities,
+      version: registration.version ?? null,
+      status: "online",
+      connectedAt: existing?.connectedAt ?? lastHeartbeatAt,
+      lastHeartbeatAt,
+      disconnectedAt: null,
+      disconnectReason: null,
+    }),
+  ]);
+}
+
+async function touchPolledWorkerInstance(instanceId: string): Promise<void> {
+  const existing = (await store.listAgentInstances()).find((item) => item.instanceId === instanceId);
+  if (!existing) {
+    return;
+  }
+  await store.saveAgentInstance({
+    ...existing,
+    status: "online",
+    lastHeartbeatAt: nowIso(),
+    disconnectedAt: null,
+    disconnectReason: null,
+  });
 }
 
 async function registerAgentConnection(
@@ -923,6 +1137,76 @@ function handleClientSocket(req: Request): Response {
   return response;
 }
 
+async function handleWorkerClaim(req: Request): Promise<Response> {
+  const auth = authorizeAgent(req);
+  const registration = parseWorkerPollRegistration(await readJsonObject(req));
+  if (!arePersonasAllowed(auth.allowedPersonaIds, registration.personaIds)) {
+    throw new ApiError(403, "forbidden_persona_registration", "Worker tried to register forbidden persona");
+  }
+
+  await savePolledWorkerPresence(registration);
+  const claimed = await store.claimQueuedRun({
+    instanceId: registration.instanceId,
+    agentId: registration.agentId,
+    personaIds: registration.personaIds,
+  });
+  if (!claimed) {
+    return noContent();
+  }
+
+  const requestContext = parseQueuedRequestContext(claimed.run.raw, claimed.run.conversationId);
+  return json({
+    type: "prompt",
+    runId: claimed.run.runId,
+    conversationId: claimed.run.conversationId,
+    personaId: claimed.run.personaId,
+    prompt: claimed.run.prompt,
+    sessionId: requestContext.sessionId ?? claimed.run.conversationId,
+    continuity: {
+      previousResponseId: claimed.previousResponseId,
+    },
+    metadata: requestContext.metadata,
+  });
+}
+
+async function handleWorkerRunResponse(req: Request, runId: string): Promise<Response> {
+  authorizeAgent(req);
+  const body = parseWorkerRunResponse(await readJsonObject(req));
+  await touchPolledWorkerInstance(body.instanceId);
+
+  const run = await store.getRun(runId);
+  if (!run) {
+    throw new ApiError(404, "run_not_found", "Run not found");
+  }
+  assertRunOwnedByInstance(body.instanceId, run);
+  await completeRunAndNotify({
+    type: "response",
+    runId,
+    conversationId: body.conversationId,
+    personaId: body.personaId,
+    reply: body.reply,
+    responseId: body.responseId ?? null,
+    model: body.model,
+    usage: body.usage,
+    raw: body.raw,
+  }, run);
+  return json({ ok: true });
+}
+
+async function handleWorkerRunError(req: Request, runId: string): Promise<Response> {
+  authorizeAgent(req);
+  const body = parseWorkerRunError(await readJsonObject(req));
+  await touchPolledWorkerInstance(body.instanceId);
+
+  const run = await store.getRun(runId);
+  if (!run) {
+    throw new ApiError(404, "run_not_found", "Run not found");
+  }
+  assertRunOwnedByInstance(body.instanceId, run);
+  await failRunAndNotify(runId, body.error, "failed", run);
+  return json({ ok: true });
+}
+
 async function handleCreateConversation(req: Request): Promise<Response> {
   const userId = getRequiredUserId(req);
   const body = await readJsonObject(req);
@@ -1032,12 +1316,21 @@ Deno.serve({ hostname: HOST, port: PORT }, async (req) => {
 
   try {
     if (url.pathname === "/healthz" && req.method === "GET") {
+      const freshAgentInstances = await listFreshAgentInstances();
+      const onlineCounts = new Map<string, number>();
+      for (const item of freshAgentInstances) {
+        for (const personaId of item.personaIds) {
+          onlineCounts.set(personaId, (onlineCounts.get(personaId) ?? 0) + 1);
+        }
+      }
       return json({
         ok: true,
         agentConnections: agentConnectionsBySocket.size,
-        registeredAgents: agentConnectionsByInstanceId.size,
+        registeredAgents: freshAgentInstances.length,
         pendingRuns: pendingRuns.size,
-        personasOnline: [...workerRegistry.personaBuckets.entries()].filter(([, bucket]) => bucket.length).map(([personaId]) => personaId),
+        personasOnline: [...onlineCounts.entries()].filter(([, count]) => count > 0).map(([personaId]) =>
+          personaId
+        ),
         adminConfigured: Boolean(
           Deno.env.get("ADMIN_PASSWORD_HASH")?.trim() && Deno.env.get("ADMIN_SESSION_SECRET")?.trim(),
         ),
@@ -1045,8 +1338,30 @@ Deno.serve({ hostname: HOST, port: PORT }, async (req) => {
       });
     }
 
+    if (url.pathname === "/" && req.method === "GET") {
+      return renderAdminPage();
+    }
+
+    if (url.pathname === "/api-docs" && req.method === "GET") {
+      return json(buildApiDocsPayload());
+    }
+
     if (url.pathname === "/agent" && req.method === "GET") {
       return await handleAgentSocket(req);
+    }
+
+    if (url.pathname === "/v1/worker/claim" && req.method === "POST") {
+      return await handleWorkerClaim(req);
+    }
+
+    const workerResponseMatch = url.pathname.match(/^\/v1\/worker\/runs\/([^/]+)\/response$/);
+    if (workerResponseMatch && req.method === "POST") {
+      return await handleWorkerRunResponse(req, decodeURIComponent(workerResponseMatch[1]));
+    }
+
+    const workerErrorMatch = url.pathname.match(/^\/v1\/worker\/runs\/([^/]+)\/error$/);
+    if (workerErrorMatch && req.method === "POST") {
+      return await handleWorkerRunError(req, decodeURIComponent(workerErrorMatch[1]));
     }
 
     if (url.pathname === "/ws" && req.method === "GET") {
@@ -1077,28 +1392,6 @@ Deno.serve({ hostname: HOST, port: PORT }, async (req) => {
     const runMatch = url.pathname.match(/^\/v1\/runs\/([^/]+)$/);
     if (runMatch && req.method === "GET") {
       return await handleRunLookup(req, decodeURIComponent(runMatch[1]));
-    }
-
-    if (url.pathname === "/" && req.method === "GET") {
-      return json({
-        name: "deno-relay-control-plane",
-        publicApis: [
-          "GET /v1/personas",
-          "GET /v1/conversations?personaId=...",
-          "POST /v1/conversations",
-          "POST /v1/conversations/continue-last",
-          "GET /v1/conversations/{conversationId}/messages",
-          "POST /v1/conversations/{conversationId}/messages",
-          "GET /v1/runs/{runId}",
-          "POST /v1/admin/login",
-          "POST /v1/knowledge/search",
-          "POST /v1/knowledge/upsert",
-        ],
-        sockets: {
-          client: "/ws",
-          agent: "/agent",
-        },
-      });
     }
 
     return json({ error: "not_found", message: "Route not found" }, 404);

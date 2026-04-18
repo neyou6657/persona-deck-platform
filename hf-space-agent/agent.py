@@ -6,7 +6,10 @@ import logging
 import os
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 import websockets
 from openai import AsyncOpenAI, OpenAIError
 
@@ -354,6 +357,8 @@ class RelayBridge:
     reconnect_seconds: float
     connected: bool = False
     last_error: str | None = None
+    last_poll_at: str | None = None
+    last_claimed_run_id: str | None = None
 
     @classmethod
     def from_env(cls, agent_client: AgentClient) -> "RelayBridge":
@@ -367,9 +372,13 @@ class RelayBridge:
     def health(self) -> dict[str, Any]:
         return {
             "relay_ws_url": self.relay_ws_url,
+            "relay_http_url": self._relay_http_base_url(),
+            "relay_transport": "worker_poll",
             "relay_configured": bool(self.relay_ws_url and self.relay_secret),
             "relay_connected": self.connected,
             "last_error": self.last_error,
+            "last_poll_at": self.last_poll_at,
+            "last_claimed_run_id": self.last_claimed_run_id,
         }
 
     async def run_forever(self) -> None:
@@ -381,19 +390,10 @@ class RelayBridge:
                 continue
 
             try:
-                async with websockets.connect(
-                    self.relay_ws_url,
-                    ping_interval=20,
-                    ping_timeout=20,
-                    max_size=4 * 1024 * 1024,
-                    additional_headers={"Authorization": f"Bearer {self.relay_secret}"},
-                ) as websocket:
-                    self.connected = True
-                    self.last_error = None
-                    logger.info("Connected to Deno relay: %s", self.relay_ws_url)
-                    await websocket.send(json.dumps(self.agent_client.build_registration_message()))
-                    async for raw_message in websocket:
-                        await self._handle_message(websocket, raw_message)
+                handled = await self._poll_once()
+                self.connected = True
+                self.last_error = None
+                await asyncio.sleep(0.25 if handled else self.reconnect_seconds)
             except asyncio.CancelledError:
                 self.connected = False
                 raise
@@ -402,6 +402,146 @@ class RelayBridge:
                 self.last_error = str(exc)
                 logger.warning("Relay connection dropped: %s", exc)
                 await asyncio.sleep(self.reconnect_seconds)
+
+    def _relay_http_base_url(self) -> str:
+        base_url = self.relay_ws_url.strip()
+        if base_url.startswith("wss://"):
+            base_url = "https://" + base_url[len("wss://"):]
+        elif base_url.startswith("ws://"):
+            base_url = "http://" + base_url[len("ws://"):]
+        if base_url.endswith("/agent"):
+            base_url = base_url[: -len("/agent")]
+        return base_url.rstrip("/")
+
+    def _worker_registration_payload(self) -> dict[str, Any]:
+        if hasattr(self.agent_client, "build_registration_message"):
+            registration = self.agent_client.build_registration_message()
+            return {
+                "agentId": registration["agentId"],
+                "instanceId": registration["instanceId"],
+                "personaIds": registration["personaIds"],
+                "capabilities": registration.get("capabilities", {}),
+                "version": registration.get("version"),
+            }
+        return {
+            "agentId": getattr(self.agent_client, "agent_id", "hf-space-agent"),
+            "instanceId": getattr(self.agent_client, "instance_id", "test-instance"),
+            "personaIds": getattr(self.agent_client, "persona_ids", ["default"]),
+            "capabilities": {"stream": False, "tools": False},
+            "version": getattr(self.agent_client, "version", None),
+        }
+
+    async def _request_json(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        url = f"{self._relay_http_base_url()}{path}"
+        headers = {"Authorization": f"Bearer {self.relay_secret}"}
+        data = None
+        if payload is not None:
+            headers["Content-Type"] = "application/json"
+            data = json.dumps(payload).encode("utf-8")
+
+        def _run() -> dict[str, Any] | None:
+            request = urllib_request.Request(url, data=data, headers=headers, method=method)
+            try:
+                with urllib_request.urlopen(request, timeout=self.agent_client.timeout_seconds) as response:
+                    body = response.read()
+                    if response.status == 204 or not body:
+                        return None
+                    return json.loads(body.decode("utf-8"))
+            except urllib_error.HTTPError as exc:
+                if exc.code == 204:
+                    return None
+                error_body = exc.read().decode("utf-8", errors="replace")
+                raise AgentError(
+                    f"relay {method} {path} failed with {exc.code}: {error_body or exc.reason}"
+                ) from exc
+
+        return await asyncio.to_thread(_run)
+
+    async def _poll_once(self) -> bool:
+        claim = await self._request_json(
+            "POST",
+            "/v1/worker/claim",
+            self._worker_registration_payload(),
+        )
+        self.last_poll_at = datetime.now(timezone.utc).isoformat()
+        if not isinstance(claim, dict) or claim.get("type") != "prompt":
+            return False
+        run_id = claim.get("runId")
+        self.last_claimed_run_id = run_id if isinstance(run_id, str) else None
+        await self._process_claimed_prompt(claim)
+        return True
+
+    async def _process_claimed_prompt(self, payload: dict[str, Any]) -> None:
+        run_id = payload.get("runId")
+        prompt = payload.get("prompt")
+        conversation_id = payload.get("conversationId")
+        persona_id = payload.get("personaId")
+        session_id = payload.get("sessionId")
+        metadata = payload.get("metadata")
+        instance_id = getattr(self.agent_client, "instance_id", "test-instance")
+        continuity = payload.get("continuity")
+        previous_response_id = (
+            continuity.get("previousResponseId")
+            if isinstance(continuity, dict)
+            and isinstance(continuity.get("previousResponseId"), str)
+            and continuity.get("previousResponseId")
+            else None
+        )
+
+        if not isinstance(run_id, str) or not run_id:
+            logger.warning("Ignoring claimed run without runId")
+            return
+        if not isinstance(prompt, str) or not prompt.strip():
+            await self._request_json(
+                "POST",
+                f"/v1/worker/runs/{run_id}/error",
+                {
+                    "instanceId": instance_id,
+                    "conversationId": conversation_id if isinstance(conversation_id, str) else None,
+                    "personaId": persona_id if isinstance(persona_id, str) else None,
+                    "error": "prompt must be a non-empty string",
+                },
+            )
+            return
+
+        try:
+            result = await self.agent_client.generate(
+                prompt=prompt.strip(),
+                session_id=session_id if isinstance(session_id, str) else None,
+                metadata=metadata if isinstance(metadata, dict) else {},
+                previous_response_id=previous_response_id,
+            )
+            await self._request_json(
+                "POST",
+                f"/v1/worker/runs/{run_id}/response",
+                {
+                    "instanceId": instance_id,
+                    "conversationId": conversation_id if isinstance(conversation_id, str) else None,
+                    "personaId": persona_id if isinstance(persona_id, str) else None,
+                    "responseId": result.get("response_id"),
+                    "reply": result["reply"],
+                    "sessionId": result.get("session_id"),
+                    "model": result.get("model"),
+                    "usage": result.get("usage"),
+                    "raw": result.get("raw"),
+                },
+            )
+        except AgentError as exc:
+            await self._request_json(
+                "POST",
+                f"/v1/worker/runs/{run_id}/error",
+                {
+                    "instanceId": instance_id,
+                    "conversationId": conversation_id if isinstance(conversation_id, str) else None,
+                    "personaId": persona_id if isinstance(persona_id, str) else None,
+                    "error": str(exc),
+                },
+            )
 
     async def _handle_message(self, websocket: Any, raw_message: str) -> None:
         try:
