@@ -2,7 +2,7 @@ import json
 import unittest
 from unittest.mock import patch
 
-from agent import AgentClient, AgentError, RelayBridge
+from agent import AgentClient, AgentError, OpenAIError, RelayBridge
 
 
 class _FakeUsage:
@@ -158,6 +158,7 @@ class AgentClientTest(unittest.IsolatedAsyncioTestCase):
             with patch.dict(
                 "os.environ",
                 {
+                    "AGENT_RUNTIME": "responses",
                     "AGENT_PROVIDER": "openai",
                     "AGENT_MODEL": "gpt-5.3-codex",
                     "AGENT_API_KEY": "test-key",
@@ -218,7 +219,14 @@ class AgentClientTest(unittest.IsolatedAsyncioTestCase):
             return instance
 
         with patch("agent.AsyncOpenAI", side_effect=_fake_openai_factory):
-            with patch.dict("os.environ", {"AGENT_API_KEY": "test-key"}, clear=False):
+            with patch.dict(
+                "os.environ",
+                {
+                    "AGENT_RUNTIME": "responses",
+                    "AGENT_API_KEY": "test-key",
+                },
+                clear=False,
+            ):
                 client = AgentClient.from_env()
                 result = await client.generate(
                     prompt="fresh prompt",
@@ -230,6 +238,52 @@ class AgentClientTest(unittest.IsolatedAsyncioTestCase):
         calls = fake_instances[0].responses.calls
         self.assertEqual(calls[0]["previous_response_id"], "resp-123")
         self.assertEqual(result["response_id"], "resp-1")
+
+    async def test_generate_retries_without_previous_response_id_when_provider_rejects_it(self):
+        class _RejectingPreviousResponseAPI:
+            def __init__(self):
+                self.calls = []
+                self._counter = 0
+
+            async def create(self, **kwargs):
+                self.calls.append(kwargs)
+                if kwargs.get("previous_response_id"):
+                    raise OpenAIError(
+                        "Error code: 400 - "
+                        "{'error': {'message': 'Unsupported parameter: previous_response_id'}}"
+                    )
+                self._counter += 1
+                return _FakeResponse(
+                    response_id=f"resp-{self._counter}",
+                    output_text=f"reply #{self._counter}",
+                )
+
+        class _RejectingPreviousResponseClient:
+            def __init__(self, **kwargs):
+                self.responses = _RejectingPreviousResponseAPI()
+
+        with patch("agent.AsyncOpenAI", _RejectingPreviousResponseClient):
+            with patch.dict(
+                "os.environ",
+                {
+                    "AGENT_RUNTIME": "responses",
+                    "AGENT_API_KEY": "test-key",
+                },
+                clear=False,
+            ):
+                client = AgentClient.from_env()
+                first = await client.generate("first", "session-1", {})
+                second = await client.generate("second", "session-1", {})
+                third = await client.generate("third", "session-1", {})
+
+        calls = client._get_sdk_client().responses.calls
+        self.assertEqual(first["reply"], "reply #1")
+        self.assertEqual(second["reply"], "reply #2")
+        self.assertEqual(third["reply"], "reply #3")
+        self.assertIsNone(calls[0]["previous_response_id"])
+        self.assertEqual(calls[1]["previous_response_id"], "resp-1")
+        self.assertNotIn("previous_response_id", calls[2])
+        self.assertNotIn("previous_response_id", calls[3])
 
     async def test_generate_uses_codex_cli_runtime_when_configured(self):
         fake_runners = []
@@ -264,6 +318,12 @@ class AgentClientTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake_runners[0].calls[0]["previous_response_id"], "resp-prev")
         self.assertEqual(result["reply"], "codex cli reply")
         self.assertEqual(result["response_id"], "codex-resp-1")
+
+    async def test_runtime_defaults_to_codex_cli(self):
+        with patch.dict("os.environ", {}, clear=True):
+            client = AgentClient.from_env()
+
+        self.assertEqual(client.runtime, "codex_cli")
 
     async def test_generate_falls_back_to_streaming_responses_when_body_text_is_empty(self):
         class _EmptyResponsesAPI:

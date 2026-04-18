@@ -77,7 +77,7 @@ The agent replies on the same WebSocket:
 - `AGENT_PERSONA_ID` (legacy single-persona fallback if `AGENT_PERSONA_IDS` is not set)
 - `AGENT_VERSION` (default: `2026-04-18`)
 - `AGENT_PROVIDER` (default: `openai_compatible`)
-- `AGENT_RUNTIME` (`responses` or `codex_cli`, default: `responses`)
+- `AGENT_RUNTIME` (`responses` or `codex_cli`, default: `codex_cli`)
 - `AGENT_MODEL` (default: `gpt-5.3-codex`)
 - `AGENT_API_KIND` (kept for compatibility, runtime is Responses-only and forces `responses`)
 - `AGENT_API_BASE_URL` (default: `https://api.openai.com/v1`)
@@ -112,11 +112,12 @@ If `AGENT_API_KEY` is missing and placeholder mode is enabled, the API still res
 
 ## Runtime modes
 
+- `AGENT_RUNTIME=codex_cli`: invokes installed `codex` CLI and continues conversations with real Codex thread ids via `codex exec resume`.
 - `AGENT_RUNTIME=responses`: uses official OpenAI Python SDK async client.
-- `AGENT_RUNTIME=codex_cli`: invokes installed `codex` CLI via non-interactive `codex exec`.
 
-Both modes preserve relay protocol and session continuity best-effort through `continuity.previousResponseId`.
-For `codex_cli`, continuity is injected into the generated prompt and tracked in-memory by synthetic `response_id`.
+Both modes preserve relay protocol.
+`codex_cli` returns the real Codex thread id as `responseId`, so later turns can resume correctly.
+`responses` now retries once without `previous_response_id` when an OpenAI-compatible provider rejects that parameter, but that compatibility fallback does not preserve multi-turn continuity by itself.
 
 ## Skills bootstrap
 

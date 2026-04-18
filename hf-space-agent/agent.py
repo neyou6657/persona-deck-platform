@@ -44,6 +44,7 @@ class AgentClient:
     _codex_runner: CodexRunner | None = field(default=None, init=False, repr=False)
     _session_response_ids: dict[str, str] = field(default_factory=dict, init=False, repr=False)
     _session_cache_limit: int = field(default=500, init=False, repr=False)
+    _responses_supports_previous_response_id: bool = field(default=True, init=False, repr=False)
 
     @classmethod
     def from_env(cls) -> "AgentClient":
@@ -55,10 +56,10 @@ class AgentClient:
             persona_ids = ["default"]
         version = os.getenv("AGENT_VERSION", "2026-04-18").strip() or "2026-04-18"
         provider = os.getenv("AGENT_PROVIDER", "openai_compatible").strip() or "openai_compatible"
-        runtime = os.getenv("AGENT_RUNTIME", "responses").strip().lower() or "responses"
+        runtime = os.getenv("AGENT_RUNTIME", "codex_cli").strip().lower() or "codex_cli"
         if runtime not in {"responses", "codex_cli"}:
-            logger.warning("AGENT_RUNTIME=%s is not supported; forcing 'responses'", runtime)
-            runtime = "responses"
+            logger.warning("AGENT_RUNTIME=%s is not supported; forcing 'codex_cli'", runtime)
+            runtime = "codex_cli"
         model = os.getenv("AGENT_MODEL", "gpt-5.3-codex").strip() or "gpt-5.3-codex"
         requested_kind = os.getenv("AGENT_API_KIND", "responses").strip() or "responses"
         if requested_kind != "responses":
@@ -201,13 +202,23 @@ class AgentClient:
             "instructions": self.system_prompt,
             "temperature": self.temperature,
             "store": self.store,
-            "previous_response_id": continuity_response_id,
         }
+        if self._responses_supports_previous_response_id:
+            request_kwargs["previous_response_id"] = continuity_response_id
 
         try:
             response = await self._get_sdk_client().responses.create(**request_kwargs)
         except OpenAIError as exc:
-            raise AgentError(f"official OpenAI SDK request failed: {exc}") from exc
+            if continuity_response_id and self._is_unsupported_previous_response_error(exc):
+                self._responses_supports_previous_response_id = False
+                retry_kwargs = dict(request_kwargs)
+                retry_kwargs.pop("previous_response_id", None)
+                try:
+                    response = await self._get_sdk_client().responses.create(**retry_kwargs)
+                except OpenAIError as retry_exc:
+                    raise AgentError(f"official OpenAI SDK request failed: {retry_exc}") from retry_exc
+            else:
+                raise AgentError(f"official OpenAI SDK request failed: {exc}") from exc
 
         usage = self._extract_usage(response)
         model = getattr(response, "model", self.model) or self.model
@@ -348,6 +359,11 @@ class AgentClient:
         while len(self._session_response_ids) > self._session_cache_limit:
             oldest_key = next(iter(self._session_response_ids))
             del self._session_response_ids[oldest_key]
+
+    @staticmethod
+    def _is_unsupported_previous_response_error(error: OpenAIError) -> bool:
+        message = str(error).lower()
+        return "previous_response_id" in message and "unsupported" in message
 
 @dataclass
 class RelayBridge:
