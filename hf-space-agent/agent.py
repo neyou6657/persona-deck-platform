@@ -12,6 +12,8 @@ from urllib.parse import urlencode, urlsplit, urlunsplit
 import websockets
 from openai import AsyncOpenAI, OpenAIError
 
+from codex_runner import CodexRunner, CodexRunnerConfig, CodexRunnerError
+
 
 logger = logging.getLogger("hf_space_agent")
 
@@ -27,6 +29,7 @@ class AgentClient:
     persona_ids: list[str]
     version: str
     provider: str
+    runtime: str
     model: str
     api_base_url: str
     api_key: str
@@ -37,6 +40,7 @@ class AgentClient:
     store: bool
     system_prompt: str
     _sdk_client: AsyncOpenAI | None = field(default=None, init=False, repr=False)
+    _codex_runner: CodexRunner | None = field(default=None, init=False, repr=False)
     _session_response_ids: dict[str, str] = field(default_factory=dict, init=False, repr=False)
     _session_cache_limit: int = field(default=500, init=False, repr=False)
 
@@ -50,6 +54,10 @@ class AgentClient:
             persona_ids = ["default"]
         version = os.getenv("AGENT_VERSION", "2026-04-18").strip() or "2026-04-18"
         provider = os.getenv("AGENT_PROVIDER", "openai_compatible").strip() or "openai_compatible"
+        runtime = os.getenv("AGENT_RUNTIME", "responses").strip().lower() or "responses"
+        if runtime not in {"responses", "codex_cli"}:
+            logger.warning("AGENT_RUNTIME=%s is not supported; forcing 'responses'", runtime)
+            runtime = "responses"
         model = os.getenv("AGENT_MODEL", "gpt-5.3-codex").strip() or "gpt-5.3-codex"
         requested_kind = os.getenv("AGENT_API_KIND", "responses").strip() or "responses"
         if requested_kind != "responses":
@@ -79,12 +87,13 @@ class AgentClient:
             "AGENT_SYSTEM_PROMPT",
             "You are Codex, a concise coding agent. Return practical implementation help.",
         ).strip()
-        return cls(
+        client = cls(
             agent_id=agent_id,
             instance_id=instance_id,
             persona_ids=persona_ids,
             version=version,
             provider=provider,
+            runtime=runtime,
             model=model,
             api_base_url=api_base_url,
             api_key=api_key,
@@ -95,6 +104,16 @@ class AgentClient:
             store=store,
             system_prompt=system_prompt,
         )
+        if runtime == "codex_cli":
+            client._codex_runner = CodexRunner(
+                CodexRunnerConfig.from_env(
+                    default_model=model,
+                    default_api_base_url=api_base_url,
+                    default_api_key=api_key,
+                    default_timeout_seconds=timeout_seconds,
+                )
+            )
+        return client
 
     def build_registration_message(self) -> dict[str, Any]:
         return {
@@ -113,11 +132,46 @@ class AgentClient:
         metadata: dict[str, Any],
         previous_response_id: str | None = None,
     ) -> dict[str, Any]:
+        if self.runtime == "codex_cli":
+            return await self._call_codex_cli(prompt, session_id, metadata, previous_response_id)
         if self.api_key:
             return await self._call_responses(prompt, session_id, metadata, previous_response_id)
         if self.placeholder_enabled:
             return await self._placeholder(prompt, session_id, metadata)
         raise AgentError("AGENT_API_KEY is not configured and placeholder mode is disabled")
+
+    async def _call_codex_cli(
+        self,
+        prompt: str,
+        session_id: str | None,
+        metadata: dict[str, Any],
+        previous_response_id: str | None,
+    ) -> dict[str, Any]:
+        continuity_response_id: str | None = None
+        if isinstance(previous_response_id, str) and previous_response_id.strip():
+            continuity_response_id = previous_response_id.strip()
+        elif session_id:
+            continuity_response_id = self._session_response_ids.get(session_id)
+
+        if self._codex_runner is None:
+            raise AgentError("AGENT_RUNTIME=codex_cli but codex runner is not initialized")
+
+        try:
+            result = await self._codex_runner.run(
+                prompt=prompt,
+                system_prompt=self.system_prompt,
+                session_id=session_id,
+                previous_response_id=continuity_response_id,
+                metadata=metadata,
+            )
+        except CodexRunnerError as exc:
+            raise AgentError(f"codex cli request failed: {exc}") from exc
+
+        response_id = result.get("response_id")
+        if session_id and isinstance(response_id, str) and response_id.strip():
+            self._session_response_ids[session_id] = response_id.strip()
+            self._trim_session_cache()
+        return result
 
     def _get_sdk_client(self) -> AsyncOpenAI:
         if self._sdk_client is None:

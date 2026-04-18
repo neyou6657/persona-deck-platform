@@ -107,6 +107,23 @@ class _FakeGeneratingClient:
         }
 
 
+class _FakeCodexRunner:
+    def __init__(self, config):
+        self.config = config
+        self.calls = []
+
+    async def run(self, **kwargs):
+        self.calls.append(kwargs)
+        return {
+            "reply": "codex cli reply",
+            "response_id": "codex-resp-1",
+            "model": "gpt-5.3-codex",
+            "usage": None,
+            "raw": {"runtime": "codex_cli"},
+            "session_id": kwargs.get("session_id"),
+        }
+
+
 class AgentClientTest(unittest.IsolatedAsyncioTestCase):
     async def test_build_registration_message_uses_persona_env(self):
         with patch.dict(
@@ -214,6 +231,40 @@ class AgentClientTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[0]["previous_response_id"], "resp-123")
         self.assertEqual(result["response_id"], "resp-1")
 
+    async def test_generate_uses_codex_cli_runtime_when_configured(self):
+        fake_runners = []
+
+        def _fake_runner_factory(config):
+            runner = _FakeCodexRunner(config)
+            fake_runners.append(runner)
+            return runner
+
+        with patch("agent.CodexRunner", side_effect=_fake_runner_factory):
+            with patch.dict(
+                "os.environ",
+                {
+                    "AGENT_RUNTIME": "codex_cli",
+                    "AGENT_API_KEY": "test-key",
+                    "AGENT_API_BASE_URL": "https://example.invalid/v1",
+                    "CODEX_API_KEY": "test-key",
+                },
+                clear=False,
+            ):
+                client = AgentClient.from_env()
+                result = await client.generate(
+                    prompt="run codex path",
+                    session_id="session-x",
+                    metadata={"channel": "relay"},
+                    previous_response_id="resp-prev",
+                )
+
+        self.assertEqual(client.runtime, "codex_cli")
+        self.assertEqual(len(fake_runners), 1)
+        self.assertEqual(len(fake_runners[0].calls), 1)
+        self.assertEqual(fake_runners[0].calls[0]["previous_response_id"], "resp-prev")
+        self.assertEqual(result["reply"], "codex cli reply")
+        self.assertEqual(result["response_id"], "codex-resp-1")
+
     async def test_generate_falls_back_to_streaming_responses_when_body_text_is_empty(self):
         class _EmptyResponsesAPI:
             def __init__(self):
@@ -252,6 +303,7 @@ class AgentClientTest(unittest.IsolatedAsyncioTestCase):
                 persona_ids=["coder"],
                 version="2026-04-18",
                 provider="openai",
+                runtime="responses",
                 model="gpt-5.3-codex",
                 api_key="test-key",
                 api_base_url="https://api.openai.com/v1",
