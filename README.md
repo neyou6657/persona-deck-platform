@@ -1,67 +1,35 @@
-# Deno Relay + HF Space Agent
+# Multi-Persona Platform Workspace
 
-This workspace now contains a two-part scaffold:
+This repository is becoming a three-part monorepo for a multi-persona chat system:
 
-- [`deno-relay`](/workspace/deno-relay): a Deno WebSocket relay that accepts client prompts and forwards them to a Hugging Face Space API.
-- [`hf-space-agent`](/workspace/hf-space-agent): a Docker-ready Hugging Face Space app that shows an intro page at `/` and exposes `POST /api/agent`.
+- [`deno-relay`](/workspace/deno-relay): Deno control plane for worker registration, persona routing, conversation state, and client APIs
+- [`hf-space-agent`](/workspace/hf-space-agent): Hugging Face Space worker that connects outbound to Deno and serves one or more personas
+- [`android-client`](/workspace/android-client): Android app for persona switching, conversation lists, continue-last-chat, new chat, and message send/receive
 
-## Request Flow
+## Architecture
 
-1. Client opens a WebSocket connection to the Deno relay at `/ws`.
-2. Client sends:
+The intended production shape is:
 
-```json
-{
-  "type": "prompt",
-  "prompt": "Write a short project summary",
-  "sessionId": "demo-session",
-  "metadata": {
-    "source": "browser"
-  }
-}
-```
+1. Android client calls the Deno control plane.
+2. Deno stores personas, conversations, messages, runs, and continuity state.
+3. Persona workers on Hugging Face connect outbound to Deno over authenticated WebSocket.
+4. Deno routes each run to the correct persona worker.
+5. Worker returns reply plus canonical continuity identifiers so the same conversation can continue later.
 
-3. The Deno relay converts that into an HTTP request to the Hugging Face Space:
+## Key Rules
 
-```json
-{
-  "prompt": "Write a short project summary",
-  "session_id": "demo-session",
-  "metadata": {
-    "source": "browser"
-  }
-}
-```
+- Hugging Face Spaces are treated as ephemeral workers, not as durable storage.
+- Conversation continuity belongs to the backend, not to HF Space memory.
+- One conversation belongs to one persona in Phase 1.
+- Android Phase 1 uses polling by `runId`, not streaming.
 
-4. The Hugging Face Space returns:
+## Docs
 
-```json
-{
-  "reply": "Your generated answer",
-  "model": "optional-model-name",
-  "session_id": "demo-session",
-  "usage": {}
-}
-```
+- Specs: [`docs/superpowers/specs/2026-04-18-multi-persona-platform/`](/workspace/docs/superpowers/specs/2026-04-18-multi-persona-platform)
+- Plans: [`docs/superpowers/plans/`](/workspace/docs/superpowers/plans)
 
-5. The Deno relay sends the normalized response back over WebSocket.
+## Package Notes
 
-## Directories
-
-- [`deno-relay/README.md`](/workspace/deno-relay/README.md): relay endpoints, environment variables, and protocol.
-- [`hf-space-agent/README.md`](/workspace/hf-space-agent/README.md): Docker Space setup, environment variables, and local run instructions.
-
-## Deployment Shape
-
-- Deploy the contents of [`hf-space-agent`](/workspace/hf-space-agent) to a Hugging Face Space configured with `sdk: docker`.
-- Deploy the contents of [`deno-relay`](/workspace/deno-relay) to your Deno target and set `HF_ENDPOINT` to the Space API URL, for example:
-
-```bash
-HF_ENDPOINT=https://your-space-name.hf.space/api/agent
-```
-
-That gives you the split you asked for:
-
-- Hugging Face root path shows a static intro page.
-- Deno owns the public WebSocket prompt entrypoint.
-- Deno forwards prompts to the agent app running behind the Hugging Face Space.
+- [`deno-relay/README.md`](/workspace/deno-relay/README.md) tracks the relay protocol and deployment notes.
+- [`hf-space-agent/README.md`](/workspace/hf-space-agent/README.md) tracks worker runtime and environment variables.
+- [`android-client/`](/workspace/android-client) contains the Phase 1 Compose scaffold and fake repository wiring.
