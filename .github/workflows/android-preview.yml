@@ -1,0 +1,58 @@
+name: Android Preview Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - feat/rollout-android-rikkahub
+    paths:
+      - "android-client/**"
+      - ".github/workflows/android-preview.yml"
+
+jobs:
+  build-android-preview:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build Android preview
+        working-directory: android-client
+        run: |
+          chmod +x gradlew
+          ./gradlew testDebugUnitTest assembleDebug
+
+      - name: Package preview artifacts
+        working-directory: android-client
+        run: |
+          mkdir -p preview-dist
+          cp app/build/outputs/apk/debug/app-debug.apk preview-dist/persona-deck-debug.apk
+          cp app/build/outputs/apk/debug/output-metadata.json preview-dist/output-metadata.json
+          tar -C app -cf preview-dist/persona-deck-buildpack.tar build
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: persona-deck-debug-apk
+          path: |
+            android-client/preview-dist/persona-deck-debug.apk
+            android-client/preview-dist/output-metadata.json
+          retention-days: 7
+
+      - name: Upload Build Pack
+        uses: actions/upload-artifact@v4
+        with:
+          name: persona-deck-buildpack
+          path: android-client/preview-dist/persona-deck-buildpack.tar
+          retention-days: 7
