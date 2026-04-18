@@ -1,7 +1,9 @@
 {
   "tasks": {
-    "start": "deno run --allow-net --allow-env main.ts",
-    "dev": "deno run --watch --allow-net --allow-env main.ts"
+    "start": "deno run --unstable-kv --allow-net --allow-env main.ts",
+    "dev": "deno run --watch --unstable-kv --allow-net --allow-env main.ts",
+    "test": "deno test -A",
+    "check": "deno check main.ts"
   },
   "fmt": {
     "lineWidth": 100,
@@ -13,6 +15,4 @@
     "app": "codex-relay-20260418-045839-ygyf"
   }
 }
-
-
 
