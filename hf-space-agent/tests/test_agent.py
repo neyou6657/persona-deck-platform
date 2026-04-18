@@ -1,7 +1,8 @@
+import json
 import unittest
 from unittest.mock import patch
 
-from agent import AgentClient, AgentError
+from agent import AgentClient, AgentError, RelayBridge
 
 
 class _FakeUsage:
@@ -83,7 +84,51 @@ class _FakeAsyncOpenAI:
         self.responses = _FakeResponsesAPI(self)
 
 
+class _FakeWebSocket:
+    def __init__(self):
+        self.sent_messages = []
+
+    async def send(self, text):
+        self.sent_messages.append(text)
+
+
+class _FakeGeneratingClient:
+    def __init__(self):
+        self.calls = []
+
+    async def generate(self, **kwargs):
+        self.calls.append(kwargs)
+        return {
+            "reply": "protocol reply",
+            "response_id": "resp-generated",
+            "model": "gpt-5.3-codex",
+            "usage": {"total_tokens": 1},
+            "raw": {"ok": True},
+        }
+
+
 class AgentClientTest(unittest.IsolatedAsyncioTestCase):
+    async def test_build_registration_message_uses_persona_env(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "AGENT_ID": "hf-space-coder-v1",
+                "AGENT_INSTANCE_ID": "instance-xyz",
+                "AGENT_PERSONA_IDS": "coder, reviewer",
+                "AGENT_VERSION": "2026-04-18",
+            },
+            clear=False,
+        ):
+            client = AgentClient.from_env()
+            message = client.build_registration_message()
+
+        self.assertEqual(message["type"], "agent_register")
+        self.assertEqual(message["agentId"], "hf-space-coder-v1")
+        self.assertEqual(message["instanceId"], "instance-xyz")
+        self.assertEqual(message["personaIds"], ["coder", "reviewer"])
+        self.assertEqual(message["version"], "2026-04-18")
+        self.assertEqual(message["capabilities"], {"stream": False, "tools": False})
+
     async def test_generate_uses_official_responses_sdk_and_preserves_session_continuity(self):
         fake_instances = []
 
@@ -111,11 +156,13 @@ class AgentClientTest(unittest.IsolatedAsyncioTestCase):
                     prompt="first prompt",
                     session_id="relay-session-1",
                     metadata={"tenant": "alpha"},
+                    previous_response_id=None,
                 )
                 second = await client.generate(
                     prompt="second prompt",
                     session_id="relay-session-1",
                     metadata={},
+                    previous_response_id=None,
                 )
 
         self.assertEqual(len(fake_instances), 1)
@@ -142,7 +189,30 @@ class AgentClientTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first["reply"], "sdk reply #1")
         self.assertEqual(second["reply"], "sdk reply #2")
         self.assertEqual(second["session_id"], "relay-session-1")
+        self.assertEqual(second["response_id"], "resp-2")
         self.assertEqual(second["usage"]["total_tokens"], 18)
+
+    async def test_generate_prefers_explicit_previous_response_id_from_relay_prompt(self):
+        fake_instances = []
+
+        def _fake_openai_factory(**kwargs):
+            instance = _FakeAsyncOpenAI(**kwargs)
+            fake_instances.append(instance)
+            return instance
+
+        with patch("agent.AsyncOpenAI", side_effect=_fake_openai_factory):
+            with patch.dict("os.environ", {"AGENT_API_KEY": "test-key"}, clear=False):
+                client = AgentClient.from_env()
+                result = await client.generate(
+                    prompt="fresh prompt",
+                    session_id="legacy-session",
+                    metadata={},
+                    previous_response_id="resp-123",
+                )
+
+        calls = fake_instances[0].responses.calls
+        self.assertEqual(calls[0]["previous_response_id"], "resp-123")
+        self.assertEqual(result["response_id"], "resp-1")
 
     async def test_generate_falls_back_to_streaming_responses_when_body_text_is_empty(self):
         class _EmptyResponsesAPI:
@@ -177,6 +247,10 @@ class AgentClientTest(unittest.IsolatedAsyncioTestCase):
 
         with patch("agent.AsyncOpenAI", _EmptyAsyncOpenAI):
             client = AgentClient(
+                agent_id="hf-space-coder-v1",
+                instance_id="test-instance",
+                persona_ids=["coder"],
+                version="2026-04-18",
                 provider="openai",
                 model="gpt-5.3-codex",
                 api_key="test-key",
@@ -191,6 +265,48 @@ class AgentClientTest(unittest.IsolatedAsyncioTestCase):
             result = await client.generate("prompt", "s1", {})
 
         self.assertEqual(result["reply"], "relay path verified")
+
+    async def test_relay_prompt_protocol_uses_run_id_persona_and_continuity(self):
+        fake_client = _FakeGeneratingClient()
+        bridge = RelayBridge(
+            agent_client=fake_client,
+            relay_ws_url="wss://relay.example/agent",
+            relay_secret="secret",
+            reconnect_seconds=1,
+        )
+        websocket = _FakeWebSocket()
+        payload = {
+            "type": "prompt",
+            "runId": "run-123",
+            "conversationId": "conv-456",
+            "personaId": "coder",
+            "prompt": "write tests please",
+            "continuity": {"previousResponseId": "resp-older"},
+            "metadata": {"client": "android"},
+        }
+
+        await bridge._handle_message(websocket, json.dumps(payload))
+
+        self.assertEqual(
+            fake_client.calls,
+            [
+                {
+                    "prompt": "write tests please",
+                    "session_id": None,
+                    "metadata": {"client": "android"},
+                    "previous_response_id": "resp-older",
+                }
+            ],
+        )
+
+        self.assertEqual(len(websocket.sent_messages), 1)
+        message = json.loads(websocket.sent_messages[0])
+        self.assertEqual(message["type"], "response")
+        self.assertEqual(message["runId"], "run-123")
+        self.assertEqual(message["conversationId"], "conv-456")
+        self.assertEqual(message["personaId"], "coder")
+        self.assertEqual(message["responseId"], "resp-generated")
+        self.assertEqual(message["reply"], "protocol reply")
 
 
 if __name__ == "__main__":

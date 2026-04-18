@@ -18,14 +18,35 @@ Docker-ready Hugging Face Space app:
 
 ## Relay protocol
 
+After websocket connect, the worker first registers persona identity:
+
+```json
+{
+  "type": "agent_register",
+  "agentId": "hf-space-coder-v1",
+  "instanceId": "uuid",
+  "personaIds": ["coder"],
+  "capabilities": {
+    "stream": false,
+    "tools": false
+  },
+  "version": "2026-04-18"
+}
+```
+
 The Deno relay sends:
 
 ```json
 {
   "type": "prompt",
-  "requestId": "uuid",
+  "runId": "uuid",
+  "conversationId": "uuid",
+  "personaId": "coder",
   "prompt": "your text",
   "sessionId": "optional",
+  "continuity": {
+    "previousResponseId": "resp_123 or null"
+  },
   "metadata": {}
 }
 ```
@@ -35,7 +56,10 @@ The agent replies on the same WebSocket:
 ```json
 {
   "type": "response",
-  "requestId": "uuid",
+  "runId": "uuid",
+  "conversationId": "uuid",
+  "personaId": "coder",
+  "responseId": "resp_456",
   "reply": "agent output",
   "model": "optional",
   "sessionId": "optional",
@@ -46,6 +70,11 @@ The agent replies on the same WebSocket:
 
 ## Environment variables
 
+- `AGENT_ID` (default: `hf-space-agent`)
+- `AGENT_INSTANCE_ID` (default: auto-generated UUID at startup)
+- `AGENT_PERSONA_IDS` (comma-separated, default: `default`)
+- `AGENT_PERSONA_ID` (legacy single-persona fallback if `AGENT_PERSONA_IDS` is not set)
+- `AGENT_VERSION` (default: `2026-04-18`)
 - `AGENT_PROVIDER` (default: `openai_compatible`)
 - `AGENT_MODEL` (default: `gpt-5.3-codex`)
 - `AGENT_API_KIND` (kept for compatibility, runtime is Responses-only and forces `responses`)
@@ -73,6 +102,7 @@ This project now uses the official OpenAI Python SDK async client:
 No hand-rolled direct HTTP calls to `/responses` or `/chat/completions` are used.
 
 Session continuity is mapped from relay `sessionId` to Responses `previous_response_id` in-memory within the running worker process.
+If relay prompt includes `continuity.previousResponseId`, that value is used as the canonical input continuity token for `responses.create(previous_response_id=...)`.
 Relay `metadata` is kept at the relay boundary and is not forwarded upstream by default, because some OpenAI-compatible gateways reject the `metadata` parameter on `responses.create(...)`.
 
 ## Run locally

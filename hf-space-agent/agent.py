@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import uuid
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlencode, urlsplit, urlunsplit
@@ -21,6 +22,10 @@ class AgentError(RuntimeError):
 
 @dataclass
 class AgentClient:
+    agent_id: str
+    instance_id: str
+    persona_ids: list[str]
+    version: str
     provider: str
     model: str
     api_base_url: str
@@ -37,6 +42,13 @@ class AgentClient:
 
     @classmethod
     def from_env(cls) -> "AgentClient":
+        agent_id = os.getenv("AGENT_ID", "hf-space-agent").strip() or "hf-space-agent"
+        instance_id = os.getenv("AGENT_INSTANCE_ID", "").strip() or str(uuid.uuid4())
+        persona_ids_raw = os.getenv("AGENT_PERSONA_IDS", os.getenv("AGENT_PERSONA_ID", "default"))
+        persona_ids = [item.strip() for item in persona_ids_raw.split(",") if item.strip()]
+        if not persona_ids:
+            persona_ids = ["default"]
+        version = os.getenv("AGENT_VERSION", "2026-04-18").strip() or "2026-04-18"
         provider = os.getenv("AGENT_PROVIDER", "openai_compatible").strip() or "openai_compatible"
         model = os.getenv("AGENT_MODEL", "gpt-5.3-codex").strip() or "gpt-5.3-codex"
         requested_kind = os.getenv("AGENT_API_KIND", "responses").strip() or "responses"
@@ -68,6 +80,10 @@ class AgentClient:
             "You are Codex, a concise coding agent. Return practical implementation help.",
         ).strip()
         return cls(
+            agent_id=agent_id,
+            instance_id=instance_id,
+            persona_ids=persona_ids,
+            version=version,
             provider=provider,
             model=model,
             api_base_url=api_base_url,
@@ -80,9 +96,25 @@ class AgentClient:
             system_prompt=system_prompt,
         )
 
-    async def generate(self, prompt: str, session_id: str | None, metadata: dict[str, Any]) -> dict[str, Any]:
+    def build_registration_message(self) -> dict[str, Any]:
+        return {
+            "type": "agent_register",
+            "agentId": self.agent_id,
+            "instanceId": self.instance_id,
+            "personaIds": self.persona_ids,
+            "capabilities": {"stream": False, "tools": False},
+            "version": self.version,
+        }
+
+    async def generate(
+        self,
+        prompt: str,
+        session_id: str | None,
+        metadata: dict[str, Any],
+        previous_response_id: str | None = None,
+    ) -> dict[str, Any]:
         if self.api_key:
-            return await self._call_responses(prompt, session_id, metadata)
+            return await self._call_responses(prompt, session_id, metadata, previous_response_id)
         if self.placeholder_enabled:
             return await self._placeholder(prompt, session_id, metadata)
         raise AgentError("AGENT_API_KEY is not configured and placeholder mode is disabled")
@@ -97,18 +129,24 @@ class AgentClient:
         return self._sdk_client
 
     async def _call_responses(
-        self, prompt: str, session_id: str | None, metadata: dict[str, Any]
+        self,
+        prompt: str,
+        session_id: str | None,
+        metadata: dict[str, Any],
+        previous_response_id: str | None,
     ) -> dict[str, Any]:
-        previous_response_id: str | None = None
-        if session_id:
-            previous_response_id = self._session_response_ids.get(session_id)
+        continuity_response_id: str | None = None
+        if isinstance(previous_response_id, str) and previous_response_id.strip():
+            continuity_response_id = previous_response_id.strip()
+        elif session_id:
+            continuity_response_id = self._session_response_ids.get(session_id)
         request_kwargs = {
             "model": self.model,
             "input": prompt,
             "instructions": self.system_prompt,
             "temperature": self.temperature,
             "store": self.store,
-            "previous_response_id": previous_response_id,
+            "previous_response_id": continuity_response_id,
         }
 
         try:
@@ -138,6 +176,7 @@ class AgentClient:
             "reply": reply,
             "model": model,
             "session_id": session_id,
+            "response_id": response_id,
             "usage": usage,
             "raw": raw,
         }
@@ -195,6 +234,7 @@ class AgentClient:
             "reply": reply,
             "model": f"{self.provider}:placeholder",
             "session_id": session_id,
+            "response_id": None,
             "usage": {"input_chars": len(prompt), "placeholder": True},
             "raw": {"placeholder": True},
         }
@@ -309,6 +349,7 @@ class RelayBridge:
                     self.connected = True
                     self.last_error = None
                     logger.info("Connected to Deno relay: %s", self.relay_ws_url)
+                    await websocket.send(json.dumps(self.agent_client.build_registration_message()))
                     async for raw_message in websocket:
                         await self._handle_message(websocket, raw_message)
             except asyncio.CancelledError:
@@ -332,20 +373,35 @@ class RelayBridge:
         if payload.get("type") != "prompt":
             return
 
+        run_id = payload.get("runId")
         request_id = payload.get("requestId")
+        if not isinstance(run_id, str) or not run_id:
+            run_id = request_id if isinstance(request_id, str) and request_id else None
         prompt = payload.get("prompt")
+        conversation_id = payload.get("conversationId")
+        persona_id = payload.get("personaId")
         session_id = payload.get("sessionId")
         metadata = payload.get("metadata")
+        continuity = payload.get("continuity")
+        previous_response_id = (
+            continuity.get("previousResponseId")
+            if isinstance(continuity, dict)
+            and isinstance(continuity.get("previousResponseId"), str)
+            and continuity.get("previousResponseId")
+            else None
+        )
 
-        if not isinstance(request_id, str) or not request_id:
-            logger.warning("Ignoring prompt without requestId")
+        if not isinstance(run_id, str) or not run_id:
+            logger.warning("Ignoring prompt without runId")
             return
         if not isinstance(prompt, str) or not prompt.strip():
             await websocket.send(
                 json.dumps(
                     {
                         "type": "error",
-                        "requestId": request_id,
+                        "runId": run_id,
+                        "conversationId": conversation_id if isinstance(conversation_id, str) else None,
+                        "personaId": persona_id if isinstance(persona_id, str) else None,
                         "error": "prompt must be a non-empty string",
                     }
                 )
@@ -357,12 +413,16 @@ class RelayBridge:
                 prompt=prompt.strip(),
                 session_id=session_id if isinstance(session_id, str) else None,
                 metadata=metadata if isinstance(metadata, dict) else {},
+                previous_response_id=previous_response_id,
             )
             await websocket.send(
                 json.dumps(
                     {
                         "type": "response",
-                        "requestId": request_id,
+                        "runId": run_id,
+                        "conversationId": conversation_id if isinstance(conversation_id, str) else None,
+                        "personaId": persona_id if isinstance(persona_id, str) else None,
+                        "responseId": result.get("response_id"),
                         "reply": result["reply"],
                         "sessionId": result.get("session_id"),
                         "model": result.get("model"),
@@ -376,7 +436,9 @@ class RelayBridge:
                 json.dumps(
                     {
                         "type": "error",
-                        "requestId": request_id,
+                        "runId": run_id,
+                        "conversationId": conversation_id if isinstance(conversation_id, str) else None,
+                        "personaId": persona_id if isinstance(persona_id, str) else None,
                         "error": str(exc),
                     }
                 )
