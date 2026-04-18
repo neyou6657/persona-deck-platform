@@ -3,7 +3,7 @@
 Persona-aware Deno control plane for the multi-persona platform:
 - HF Space workers connect outbound over `/agent`
 - workers register the persona ids they can serve
-- conversations, messages, continuity state, and runs are stored in Deno KV
+- PostgreSQL is the system of record for personas, conversations, messages, runs, admin sessions, and knowledge docs
 - Android or web clients use `/v1/...` APIs plus optional `/ws` real-time requests
 
 ## Endpoints
@@ -19,15 +19,28 @@ Persona-aware Deno control plane for the multi-persona platform:
 - `GET /v1/conversations/{conversationId}/messages`
 - `POST /v1/conversations/{conversationId}/messages`
 - `GET /v1/runs/{runId}`
+- `POST /v1/admin/login`
+- `GET /v1/admin/session`
+- `GET /v1/admin/personas`
+- `POST /v1/knowledge/search`
+- `POST /v1/knowledge/upsert`
 
 ## Environment Variables
 
 - `HOST` default `0.0.0.0`
 - `PORT` default `8000`
+- `DATABASE_URL` required PostgreSQL connection string
+- `PGVECTOR_EMBED_DIM` reserved for embedding/vector width coordination
 - `AGENT_SHARED_SECRET` fallback worker token with wildcard persona access
+- `AGENT_TOOL_SHARED_SECRET` shared secret for knowledge search and writeback routes
 - `AGENT_TOKEN_PERSONAS_JSON` optional token map such as `{"secret-a":["coder"],"secret-b":"*"}`
 - `AGENT_REQUEST_TIMEOUT_MS` default `90000`
 - `PERSONA_CATALOG_JSON` optional persona seed array
+- `ADMIN_PASSWORD_HASH` SHA-256 password hash, usually stored as `sha256:<hex>`
+- `ADMIN_SESSION_SECRET` pepper used to hash admin bearer tokens before persistence
+- `ADMIN_SESSION_TTL_HOURS` admin session lifetime, default `24`
+- `KNOWLEDGE_SEARCH_LIMIT` default skill search limit
+- `KNOWLEDGE_WRITEBACK_MODE` advisory knob for worker/skill behavior, current default is `explicit`
 
 ## Worker Protocol
 
@@ -90,6 +103,10 @@ Worker response:
 
 Temporary auth uses the `x-user-id` header. Glamorous? No. Effective? Absolutely.
 
+Admin auth is separate. `POST /v1/admin/login` returns a bearer token; all later admin calls use `Authorization: Bearer <token>`.
+
+Knowledge routes are private to agents/tools. Call them with `Authorization: Bearer <AGENT_TOOL_SHARED_SECRET>` or `x-knowledge-secret`.
+
 ## Run
 
 ```bash
@@ -99,4 +116,4 @@ deno task check
 deno task start
 ```
 
-If you bypass tasks and run `deno run` directly, add `--unstable-kv`, otherwise Deno will throw a tiny bureaucratic tantrum.
+Before production startup, apply [`sql/001_control_plane_pg.sql`](/workspace/.worktrees/rollout-deno-pg/deno-relay/sql/001_control_plane_pg.sql) to PostgreSQL. KV has retired; it served, it saluted, it went home.

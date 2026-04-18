@@ -2,80 +2,23 @@ import {
   createWorkerRegistryState,
   pickWorkerForPersona,
   registerWorker,
-  type RunStatus,
   unregisterWorker,
   type WorkerRegistration,
 } from "./domain.ts";
+import { handleAdminRequest } from "./admin_routes.ts";
+import {
+  createPostgresControlPlaneStore,
+  type AgentInstanceRecord,
+  type ConversationRecord,
+  type JsonObject,
+  type PersonaSeed,
+  type RunStatus,
+  type StoredRun,
+  StoreError,
+} from "./postgres.ts";
+import { handleKnowledgeRequest } from "./knowledge_routes.ts";
 
-type JsonObject = Record<string, unknown>;
 type AllowedPersonaScope = "*" | Set<string>;
-type MessageRole = "user" | "assistant";
-
-type PersonaRecord = {
-  personaId: string;
-  displayName: string;
-  description: string;
-  workerRoutingMode: "round_robin";
-  enabled: boolean;
-  metadata: JsonObject;
-  updatedAt: string;
-};
-
-type ConversationRecord = {
-  conversationId: string;
-  userId: string;
-  personaId: string;
-  title: string;
-  status: "active";
-  createdAt: string;
-  updatedAt: string;
-  lastMessagePreview: string | null;
-};
-
-type ConversationStateRecord = {
-  conversationId: string;
-  personaId: string;
-  previousResponseId: string | null;
-  lastRunId: string | null;
-  updatedAt: string;
-};
-
-type MessageRecord = {
-  messageId: string;
-  conversationId: string;
-  role: MessageRole;
-  content: string;
-  personaId: string;
-  clientMessageId: string | null;
-  createdAt: string;
-};
-
-type StoredRun = {
-  runId: string;
-  conversationId: string;
-  personaId: string;
-  agentInstanceId: string | null;
-  status: RunStatus;
-  prompt: string;
-  reply?: string;
-  error?: string;
-  usage?: unknown;
-  raw?: unknown;
-  model?: string | null;
-  responseId?: string | null;
-  assistantMessageId?: string | null;
-  createdAt: string;
-  completedAt?: string;
-};
-
-type MessageDedupeRecord = {
-  userId: string;
-  conversationId: string;
-  clientMessageId: string;
-  runId: string;
-  messageId: string;
-  createdAt: string;
-};
 
 type AgentRegisterMessage = {
   type: "agent_register";
@@ -119,7 +62,6 @@ type AgentMessage =
 type ClientTarget = {
   personaId?: string;
   agentId?: string;
-  mode?: string;
 };
 
 type ClientPromptMessage = {
@@ -152,12 +94,6 @@ type PendingRun = {
   timeoutId: ReturnType<typeof setTimeout>;
 };
 
-type ActiveRunRecord = {
-  runId: string;
-  conversationId: string;
-  createdAt: string;
-};
-
 class ApiError extends Error {
   status: number;
   code: string;
@@ -171,42 +107,61 @@ class ApiError extends Error {
 
 const PORT = Number(Deno.env.get("PORT") ?? "8000");
 const HOST = Deno.env.get("HOST") ?? "0.0.0.0";
-const AGENT_SHARED_SECRET = Deno.env.get("AGENT_SHARED_SECRET") ?? "";
-const AGENT_REQUEST_TIMEOUT_MS = Number(Deno.env.get("AGENT_REQUEST_TIMEOUT_MS") ?? "90000");
 const USER_HEADER = "x-user-id";
+const DATABASE_URL = Deno.env.get("DATABASE_URL")?.trim() ?? "";
 const PERSONA_CATALOG_JSON = Deno.env.get("PERSONA_CATALOG_JSON") ?? "";
+const AGENT_SHARED_SECRET = Deno.env.get("AGENT_SHARED_SECRET")?.trim() ?? "";
+const AGENT_TOOL_SHARED_SECRET = Deno.env.get("AGENT_TOOL_SHARED_SECRET")?.trim() ||
+  AGENT_SHARED_SECRET;
+const AGENT_REQUEST_TIMEOUT_MS = Number(Deno.env.get("AGENT_REQUEST_TIMEOUT_MS") ?? "90000");
 const AGENT_TOKEN_PERSONAS_JSON = Deno.env.get("AGENT_TOKEN_PERSONAS_JSON") ?? "";
+const KNOWLEDGE_SEARCH_LIMIT = Math.max(
+  1,
+  Math.min(Number(Deno.env.get("KNOWLEDGE_SEARCH_LIMIT") ?? "8") || 8, 20),
+);
 const RELAY_RESTART_ERROR = "Relay restarted before the run completed";
 
-const kv = await Deno.openKv();
+if (!DATABASE_URL) {
+  throw new Error("DATABASE_URL is required");
+}
+
+const store = createPostgresControlPlaneStore(DATABASE_URL);
 const workerRegistry = createWorkerRegistryState();
 const agentConnectionsBySocket = new Map<WebSocket, AgentConnection>();
 const agentConnectionsByInstanceId = new Map<string, AgentConnection>();
 const pendingRuns = new Map<string, PendingRun>();
 const agentTokenPolicies = parseAgentTokenPolicies();
 
-await seedPersonaCatalog();
-await recoverInterruptedRuns();
+await store.seedPersonas(parsePersonaCatalog());
+await store.recoverInterruptedRuns(RELAY_RESTART_ERROR);
 
 function nowIso(): string {
   return new Date().toISOString();
 }
 
 function json(data: unknown, status = 200): Response {
-  const headers = new Headers();
-  headers.set("content-type", "application/json; charset=utf-8");
-  headers.set("access-control-allow-origin", "*");
-  headers.set("access-control-allow-headers", "content-type, authorization, x-user-id");
-  headers.set("access-control-allow-methods", "GET, POST, OPTIONS");
-  return new Response(JSON.stringify(data), { status, headers });
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "access-control-allow-origin": "*",
+      "access-control-allow-headers":
+        "content-type, authorization, x-user-id, x-knowledge-secret",
+      "access-control-allow-methods": "GET, POST, PATCH, DELETE, OPTIONS",
+    },
+  });
 }
 
 function noContent(): Response {
-  const headers = new Headers();
-  headers.set("access-control-allow-origin", "*");
-  headers.set("access-control-allow-headers", "content-type, authorization, x-user-id");
-  headers.set("access-control-allow-methods", "GET, POST, OPTIONS");
-  return new Response(null, { status: 204, headers });
+  return new Response(null, {
+    status: 204,
+    headers: {
+      "access-control-allow-origin": "*",
+      "access-control-allow-headers":
+        "content-type, authorization, x-user-id, x-knowledge-secret",
+      "access-control-allow-methods": "GET, POST, PATCH, DELETE, OPTIONS",
+    },
+  });
 }
 
 function previewText(text: string, limit = 160): string {
@@ -217,87 +172,78 @@ function previewText(text: string, limit = 160): string {
   return `${normalized.slice(0, limit - 1)}…`;
 }
 
-function defaultPersonaDisplayName(personaId: string): string {
-  return personaId
-    .split(/[-_]/g)
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ");
-}
-
-function defaultConversationTitle(prompt: string): string {
-  const preview = previewText(prompt, 60);
-  return preview || "New chat";
-}
-
-function personaKey(personaId: string): Deno.KvKey {
-  return ["persona", personaId];
-}
-
-function agentInstanceKey(instanceId: string): Deno.KvKey {
-  return ["agentInstance", instanceId];
-}
-
-function conversationKey(conversationId: string): Deno.KvKey {
-  return ["conversation", conversationId];
-}
-
-function conversationIndexKey(
-  userId: string,
-  personaId: string,
-  updatedAt: string,
-  conversationId: string,
-): Deno.KvKey {
-  return ["conversationByUserPersonaUpdatedAt", userId, personaId, updatedAt, conversationId];
-}
-
-function messageKey(conversationId: string, messageId: string): Deno.KvKey {
-  return ["message", conversationId, messageId];
-}
-
-function messageIndexKey(conversationId: string, createdAt: string, messageId: string): Deno.KvKey {
-  return ["messageByConversationCreatedAt", conversationId, createdAt, messageId];
-}
-
-function runKey(runId: string): Deno.KvKey {
-  return ["run", runId];
-}
-
-function runIndexKey(conversationId: string, createdAt: string, runId: string): Deno.KvKey {
-  return ["runByConversationCreatedAt", conversationId, createdAt, runId];
-}
-
-function conversationActiveRunKey(conversationId: string): Deno.KvKey {
-  return ["conversationActiveRun", conversationId];
-}
-
-function conversationStateKey(conversationId: string): Deno.KvKey {
-  return ["conversationState", conversationId];
-}
-
-function messageDedupeKey(
-  userId: string,
-  conversationId: string,
-  clientMessageId: string,
-): Deno.KvKey {
-  return ["messageDedupe", userId, conversationId, clientMessageId];
+function parsePersonaCatalog(): PersonaSeed[] {
+  if (!PERSONA_CATALOG_JSON.trim()) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(PERSONA_CATALOG_JSON);
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed.flatMap((item): PersonaSeed[] => {
+      if (typeof item !== "object" || item === null || Array.isArray(item)) {
+        return [];
+      }
+      const personaId = normalizeString((item as JsonObject).personaId);
+      if (!personaId) {
+        return [];
+      }
+      return [{
+        personaId,
+        displayName: normalizeString((item as JsonObject).displayName) ?? undefined,
+        description: normalizeString((item as JsonObject).description) ?? undefined,
+        enabled: typeof (item as JsonObject).enabled === "boolean"
+          ? Boolean((item as JsonObject).enabled)
+          : undefined,
+        metadata: normalizeJsonObject((item as JsonObject).metadata),
+      }];
+    });
+  } catch (error) {
+    console.warn("Ignoring invalid PERSONA_CATALOG_JSON", error);
+    return [];
+  }
 }
 
 function parseJson(raw: string): JsonObject {
-  let value: unknown;
   try {
-    value = JSON.parse(raw);
-  } catch {
+    const value = JSON.parse(raw);
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      throw new ApiError(400, "invalid_json", "Body must be a JSON object");
+    }
+    return value as JsonObject;
+  } catch (error) {
+    if (error instanceof ApiError) {
+      throw error;
+    }
     throw new ApiError(400, "invalid_json", "Body must be valid JSON");
   }
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new ApiError(400, "invalid_json", "Body must be a JSON object");
-  }
-  return value as JsonObject;
 }
 
 async function readJsonObject(req: Request): Promise<JsonObject> {
   return parseJson(await req.text());
+}
+
+function normalizeString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function normalizeJsonObject(value: unknown): JsonObject {
+  if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+    return value as JsonObject;
+  }
+  return {};
+}
+
+function parseStringArray(value: unknown, fieldName: string): string[] {
+  if (!Array.isArray(value) || !value.length) {
+    throw new ApiError(400, "invalid_request", `${fieldName} must be a non-empty string array`);
+  }
+  const parsed = value.map((item) => normalizeString(item)).filter((item): item is string => Boolean(item));
+  if (parsed.length !== value.length) {
+    throw new ApiError(400, "invalid_request", `${fieldName} must contain only non-empty strings`);
+  }
+  return [...new Set(parsed)];
 }
 
 function sendJson(socket: WebSocket, payload: unknown): void {
@@ -342,79 +288,38 @@ function getOptionalWsUserId(req: Request): string | null {
   return fromQuery || null;
 }
 
-function normalizeString(value: unknown): string | null {
-  return typeof value === "string" && value.trim() ? value.trim() : null;
-}
-
-function normalizeJsonObject(value: unknown): JsonObject {
-  if (typeof value === "object" && value !== null && !Array.isArray(value)) {
-    return value as JsonObject;
-  }
-  return {};
-}
-
-function parseStringArray(value: unknown, fieldName: string): string[] {
-  if (!Array.isArray(value) || !value.length) {
-    throw new ApiError(400, "invalid_request", `${fieldName} must be a non-empty string array`);
-  }
-  const parsed = value
-    .map((item) => normalizeString(item))
-    .filter((item): item is string => item !== null);
-  if (!parsed.length || parsed.length !== value.length) {
-    throw new ApiError(400, "invalid_request", `${fieldName} must contain only non-empty strings`);
-  }
-  return [...new Set(parsed)];
-}
-
 function parseClientPrompt(raw: string): ClientPromptMessage {
   const value = parseJson(raw);
-  if (value.type !== "prompt") {
-    throw new ApiError(
-      400,
-      "invalid_request",
-      'Unsupported client message type. Expected "prompt"',
-    );
-  }
-
   const prompt = normalizeString(value.prompt);
-  if (!prompt) {
-    throw new ApiError(400, "invalid_request", "Field prompt must be a non-empty string");
+  if (value.type !== "prompt" || !prompt) {
+    throw new ApiError(400, "invalid_request", 'Client message must be {"type":"prompt","prompt":"..."}');
   }
-
-  const conversationId = normalizeString(value.conversationId);
-  const sessionId = normalizeString(value.sessionId);
-  const clientMessageId = normalizeString(value.clientMessageId);
-  const title = normalizeString(value.title);
-  const metadata = normalizeJsonObject(value.metadata);
-
   let target: ClientTarget | undefined;
   if (value.target !== undefined) {
     if (typeof value.target !== "object" || value.target === null || Array.isArray(value.target)) {
-      throw new ApiError(400, "invalid_request", "Field target must be an object when provided");
+      throw new ApiError(400, "invalid_request", "target must be an object when provided");
     }
+    const rawTarget = value.target as JsonObject;
     target = {
-      personaId: normalizeString((value.target as JsonObject).personaId) ?? undefined,
-      agentId: normalizeString((value.target as JsonObject).agentId) ?? undefined,
-      mode: normalizeString((value.target as JsonObject).mode) ?? undefined,
+      personaId: normalizeString(rawTarget.personaId) ?? undefined,
+      agentId: normalizeString(rawTarget.agentId) ?? undefined,
     };
   }
-
   return {
     type: "prompt",
     prompt,
-    conversationId: conversationId ?? undefined,
-    sessionId: sessionId ?? undefined,
-    clientMessageId: clientMessageId ?? undefined,
+    conversationId: normalizeString(value.conversationId) ?? undefined,
+    sessionId: normalizeString(value.sessionId) ?? undefined,
+    clientMessageId: normalizeString(value.clientMessageId) ?? undefined,
     target,
-    metadata,
-    title: title ?? undefined,
+    metadata: normalizeJsonObject(value.metadata),
+    title: normalizeString(value.title) ?? undefined,
   };
 }
 
 function parseAgentMessage(raw: string): AgentMessage {
   const value = parseJson(raw);
   const type = normalizeString(value.type);
-
   if (type === "agent_register") {
     return {
       type,
@@ -425,16 +330,14 @@ function parseAgentMessage(raw: string): AgentMessage {
       version: normalizeString(value.version) ?? undefined,
     };
   }
-
   if (type === "agent_heartbeat") {
     return { type };
   }
-
   if (type === "response") {
     const runId = normalizeString(value.runId);
     const reply = normalizeString(value.reply);
     if (!runId || !reply) {
-      throw new ApiError(400, "invalid_request", "Agent response requires runId and reply");
+      throw new ApiError(400, "invalid_request", "response requires runId and reply");
     }
     return {
       type,
@@ -448,12 +351,11 @@ function parseAgentMessage(raw: string): AgentMessage {
       raw: value.raw,
     };
   }
-
   if (type === "error") {
     const runId = normalizeString(value.runId);
     const error = normalizeString(value.error);
     if (!runId || !error) {
-      throw new ApiError(400, "invalid_request", "Agent error requires runId and error");
+      throw new ApiError(400, "invalid_request", "error requires runId and error");
     }
     return {
       type,
@@ -463,44 +365,39 @@ function parseAgentMessage(raw: string): AgentMessage {
       error,
     };
   }
-
   throw new ApiError(400, "invalid_request", "Unsupported agent message type");
 }
 
 function parseAgentTokenPolicies(): Map<string, AllowedPersonaScope> {
   const policies = new Map<string, AllowedPersonaScope>();
   if (AGENT_TOKEN_PERSONAS_JSON.trim()) {
-    let parsed: unknown;
     try {
-      parsed = JSON.parse(AGENT_TOKEN_PERSONAS_JSON);
-    } catch (error) {
-      console.warn("Ignoring invalid AGENT_TOKEN_PERSONAS_JSON", error);
-    }
-    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
-      for (const [token, allowed] of Object.entries(parsed)) {
-        if (!token.trim()) {
-          continue;
-        }
-        if (allowed === "*") {
-          policies.set(token, "*");
-          continue;
-        }
-        if (Array.isArray(allowed)) {
-          const personaIds = allowed
-            .map((item) => normalizeString(item))
-            .filter((item): item is string => item !== null);
-          if (personaIds.length) {
-            policies.set(token, new Set(personaIds));
+      const parsed = JSON.parse(AGENT_TOKEN_PERSONAS_JSON);
+      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+        for (const [token, allowed] of Object.entries(parsed)) {
+          if (!token.trim()) {
+            continue;
+          }
+          if (allowed === "*") {
+            policies.set(token, "*");
+            continue;
+          }
+          if (Array.isArray(allowed)) {
+            const personaIds = allowed.map((item) => normalizeString(item)).filter((item): item is string => Boolean(item));
+            if (personaIds.length) {
+              policies.set(token, new Set(personaIds));
+            }
           }
         }
       }
+    } catch (error) {
+      console.warn("Ignoring invalid AGENT_TOKEN_PERSONAS_JSON", error);
     }
   }
 
-  if (AGENT_SHARED_SECRET.trim() && !policies.has(AGENT_SHARED_SECRET.trim())) {
-    policies.set(AGENT_SHARED_SECRET.trim(), "*");
+  if (AGENT_SHARED_SECRET && !policies.has(AGENT_SHARED_SECRET)) {
+    policies.set(AGENT_SHARED_SECRET, "*");
   }
-
   return policies;
 }
 
@@ -510,9 +407,9 @@ function extractAgentToken(req: Request): string | null {
   if (queryToken) {
     return queryToken;
   }
-  const authHeader = req.headers.get("authorization");
-  if (authHeader?.startsWith("Bearer ")) {
-    return normalizeString(authHeader.slice("Bearer ".length));
+  const auth = req.headers.get("authorization");
+  if (auth?.startsWith("Bearer ")) {
+    return auth.slice("Bearer ".length).trim() || null;
   }
   return null;
 }
@@ -537,269 +434,41 @@ function arePersonasAllowed(scope: AllowedPersonaScope, personaIds: string[]): b
   return personaIds.every((personaId) => isPersonaAllowed(scope, personaId));
 }
 
-function isTerminalStatus(status: RunStatus): boolean {
-  return status === "completed" || status === "failed" || status === "timed_out";
-}
-
-async function seedPersonaCatalog(): Promise<void> {
-  if (!PERSONA_CATALOG_JSON.trim()) {
-    return;
+function buildAgentInstanceRecord(connection: AgentConnection): AgentInstanceRecord | null {
+  if (!connection.worker) {
+    return null;
   }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(PERSONA_CATALOG_JSON);
-  } catch (error) {
-    console.warn("Ignoring invalid PERSONA_CATALOG_JSON", error);
-    return;
-  }
-
-  if (!Array.isArray(parsed)) {
-    console.warn("Ignoring PERSONA_CATALOG_JSON because it is not an array");
-    return;
-  }
-
-  for (const item of parsed) {
-    if (typeof item !== "object" || item === null || Array.isArray(item)) {
-      continue;
-    }
-    const personaId = normalizeString((item as JsonObject).personaId);
-    if (!personaId) {
-      continue;
-    }
-    const existing = await kv.get<PersonaRecord>(personaKey(personaId));
-    const updatedAt = nowIso();
-    const value: PersonaRecord = {
-      personaId,
-      displayName: normalizeString((item as JsonObject).displayName) ??
-        existing.value?.displayName ?? defaultPersonaDisplayName(personaId),
-      description: normalizeString((item as JsonObject).description) ??
-        existing.value?.description ?? "",
-      workerRoutingMode: "round_robin",
-      enabled: (item as JsonObject).enabled === false ? false : existing.value?.enabled ?? true,
-      metadata: normalizeJsonObject((item as JsonObject).metadata),
-      updatedAt,
-    };
-    await kv.set(personaKey(personaId), value);
-  }
-}
-
-async function ensurePersonaRecord(personaId: string): Promise<PersonaRecord> {
-  const existing = await kv.get<PersonaRecord>(personaKey(personaId));
-  if (existing.value) {
-    return existing.value;
-  }
-
-  const record: PersonaRecord = {
-    personaId,
-    displayName: defaultPersonaDisplayName(personaId),
-    description: "",
-    workerRoutingMode: "round_robin",
-    enabled: true,
-    metadata: {},
-    updatedAt: nowIso(),
+  return {
+    instanceId: connection.worker.instanceId,
+    agentId: connection.worker.agentId,
+    personaIds: connection.worker.personaIds,
+    capabilities: connection.worker.capabilities ?? {},
+    version: connection.version,
+    status: "online",
+    connectedAt: connection.connectedAt,
+    lastHeartbeatAt: connection.lastHeartbeatAt,
   };
-  await kv.set(personaKey(personaId), record);
-  return record;
 }
 
-async function saveConversation(
-  conversation: ConversationRecord,
-  previousUpdatedAt?: string,
-): Promise<void> {
-  const atomic = kv
-    .atomic()
-    .set(conversationKey(conversation.conversationId), conversation)
-    .set(
-      conversationIndexKey(
-        conversation.userId,
-        conversation.personaId,
-        conversation.updatedAt,
-        conversation.conversationId,
-      ),
-      conversation,
-    );
-  if (previousUpdatedAt && previousUpdatedAt !== conversation.updatedAt) {
-    atomic.delete(
-      conversationIndexKey(
-        conversation.userId,
-        conversation.personaId,
-        previousUpdatedAt,
-        conversation.conversationId,
-      ),
-    );
-  }
-  await atomic.commit();
-}
-
-async function saveMessage(message: MessageRecord): Promise<void> {
-  await kv
-    .atomic()
-    .set(messageKey(message.conversationId, message.messageId), message)
-    .set(messageIndexKey(message.conversationId, message.createdAt, message.messageId), message)
-    .commit();
-}
-
-async function saveRun(run: StoredRun): Promise<void> {
-  await kv
-    .atomic()
-    .set(runKey(run.runId), run)
-    .set(runIndexKey(run.conversationId, run.createdAt, run.runId), run)
-    .commit();
-}
-
-async function saveConversationState(state: ConversationStateRecord): Promise<void> {
-  await kv.set(conversationStateKey(state.conversationId), state);
-}
-
-async function getConversationOwned(
-  userId: string,
-  conversationId: string,
-): Promise<ConversationRecord> {
-  const entry = await kv.get<ConversationRecord>(conversationKey(conversationId));
-  if (!entry.value || entry.value.userId !== userId) {
-    throw new ApiError(404, "conversation_not_found", "Conversation not found");
-  }
-  return entry.value;
-}
-
-async function getConversationStateRecord(
-  conversationId: string,
-): Promise<ConversationStateRecord | null> {
-  const entry = await kv.get<ConversationStateRecord>(conversationStateKey(conversationId));
-  return entry.value ?? null;
-}
-
-async function getRunOwned(userId: string, runId: string): Promise<StoredRun> {
-  const entry = await kv.get<StoredRun>(runKey(runId));
-  if (!entry.value) {
-    throw new ApiError(404, "run_not_found", "Run not found");
-  }
-  const conversation = await kv.get<ConversationRecord>(
-    conversationKey(entry.value.conversationId),
-  );
-  if (!conversation.value || conversation.value.userId !== userId) {
-    throw new ApiError(404, "run_not_found", "Run not found");
-  }
-  return entry.value;
-}
-
-async function createConversation(
-  userId: string,
-  personaId: string,
-  title?: string,
-): Promise<ConversationRecord> {
-  await ensurePersonaRecord(personaId);
-  const createdAt = nowIso();
-  const conversation: ConversationRecord = {
-    conversationId: crypto.randomUUID(),
-    userId,
-    personaId,
-    title: title?.trim() || "New chat",
-    status: "active",
-    createdAt,
-    updatedAt: createdAt,
-    lastMessagePreview: null,
-  };
-
-  const state: ConversationStateRecord = {
-    conversationId: conversation.conversationId,
-    personaId,
-    previousResponseId: null,
-    lastRunId: null,
-    updatedAt: createdAt,
-  };
-
-  await kv
-    .atomic()
-    .set(conversationKey(conversation.conversationId), conversation)
-    .set(
-      conversationIndexKey(userId, personaId, conversation.updatedAt, conversation.conversationId),
-      conversation,
-    )
-    .set(conversationStateKey(conversation.conversationId), state)
-    .commit();
-
-  return conversation;
-}
-
-async function continueLastConversation(
-  userId: string,
-  personaId: string,
-): Promise<ConversationRecord> {
-  await ensurePersonaRecord(personaId);
-  const iterator = kv.list<ConversationRecord>(
-    { prefix: ["conversationByUserPersonaUpdatedAt", userId, personaId] },
-    { limit: 1, reverse: true },
-  );
-
-  for await (const entry of iterator) {
-    if (entry.value) {
-      return entry.value;
+function mapStoreError(error: unknown): never {
+  if (error instanceof StoreError) {
+    if (error.code === "conversation_busy") {
+      throw new ApiError(409, "conversation_busy", "A run is already active for this conversation");
+    }
+    if (error.code === "run_not_found") {
+      throw new ApiError(404, "run_not_found", "Run not found");
     }
   }
-
-  return createConversation(userId, personaId);
+  throw error;
 }
 
-async function listConversations(
-  userId: string,
-  personaId: string,
-  limit: number,
-): Promise<ConversationRecord[]> {
-  const values: ConversationRecord[] = [];
-  const iterator = kv.list<ConversationRecord>(
-    { prefix: ["conversationByUserPersonaUpdatedAt", userId, personaId] },
-    { limit, reverse: true },
-  );
-  for await (const entry of iterator) {
-    values.push(entry.value);
-  }
-  return values;
-}
-
-async function listMessages(conversationId: string): Promise<MessageRecord[]> {
-  const values: MessageRecord[] = [];
-  const iterator = kv.list<MessageRecord>({
-    prefix: ["messageByConversationCreatedAt", conversationId],
-  });
-  for await (const entry of iterator) {
-    values.push(entry.value);
-  }
-  return values;
-}
-
-async function listPersonas(): Promise<
-  Array<PersonaRecord & { online: boolean; connectedWorkers: number }>
-> {
-  const personaMap = new Map<string, PersonaRecord>();
-
-  for await (const entry of kv.list<PersonaRecord>({ prefix: ["persona"] })) {
-    personaMap.set(entry.key[1] as string, entry.value);
-  }
-
-  for (const personaId of workerRegistry.personaBuckets.keys()) {
-    if (!personaMap.has(personaId)) {
-      personaMap.set(personaId, await ensurePersonaRecord(personaId));
-    }
-  }
-
-  return [...personaMap.values()]
-    .sort((a, b) => a.personaId.localeCompare(b.personaId))
-    .map((persona) => ({
-      ...persona,
-      online: (workerRegistry.personaBuckets.get(persona.personaId) ?? []).length > 0,
-      connectedWorkers: (workerRegistry.personaBuckets.get(persona.personaId) ?? []).length,
-    }));
-}
-
-async function recoverInterruptedRuns(): Promise<void> {
-  for await (const entry of kv.list<StoredRun>({ prefix: ["run"] })) {
-    if (entry.value.status !== "queued" && entry.value.status !== "in_progress") {
-      continue;
-    }
-    await finalizeFailedRun(entry.value, RELAY_RESTART_ERROR, "timed_out");
-  }
+async function listPersonas(): Promise<Array<JsonObject>> {
+  const personas = await store.listPersonas();
+  return personas.map((persona) => ({
+    ...persona,
+    online: (workerRegistry.personaBuckets.get(persona.personaId) ?? []).length > 0,
+    connectedWorkers: (workerRegistry.personaBuckets.get(persona.personaId) ?? []).length,
+  }));
 }
 
 function pickLiveWorkerConnection(personaId: string, agentId?: string): AgentConnection | null {
@@ -833,47 +502,6 @@ function pickLiveWorkerConnection(personaId: string, agentId?: string): AgentCon
   return null;
 }
 
-async function releaseConversationActiveRun(conversationId: string, runId: string): Promise<void> {
-  const activeEntry = await kv.get<ActiveRunRecord>(conversationActiveRunKey(conversationId));
-  if (activeEntry.value?.runId !== runId) {
-    return;
-  }
-  await kv.delete(conversationActiveRunKey(conversationId));
-}
-
-async function finalizeFailedRun(
-  run: StoredRun,
-  error: string,
-  status: Extract<RunStatus, "failed" | "timed_out">,
-): Promise<void> {
-  if (isTerminalStatus(run.status)) {
-    return;
-  }
-
-  const completedAt = nowIso();
-  const failedRun: StoredRun = {
-    ...run,
-    status,
-    error,
-    completedAt,
-  };
-
-  const existingState = await getConversationStateRecord(run.conversationId);
-  const atomic = kv
-    .atomic()
-    .set(runKey(failedRun.runId), failedRun)
-    .set(runIndexKey(failedRun.conversationId, failedRun.createdAt, failedRun.runId), failedRun);
-  if (existingState) {
-    atomic.set(conversationStateKey(existingState.conversationId), {
-      ...existingState,
-      lastRunId: run.runId,
-      updatedAt: completedAt,
-    });
-  }
-  await atomic.commit();
-  await releaseConversationActiveRun(run.conversationId, run.runId);
-}
-
 function createPendingRun(
   runId: string,
   conversationId: string,
@@ -883,7 +511,6 @@ function createPendingRun(
   const timeoutId = setTimeout(() => {
     void failRunAndNotify(runId, "Agent request timed out", "timed_out");
   }, AGENT_REQUEST_TIMEOUT_MS);
-
   const pending: PendingRun = {
     runId,
     conversationId,
@@ -913,6 +540,22 @@ function detachClientSocket(socket: WebSocket): void {
   }
 }
 
+async function getConversationOwned(userId: string, conversationId: string): Promise<ConversationRecord> {
+  const conversation = await store.getConversationOwned(userId, conversationId);
+  if (!conversation) {
+    throw new ApiError(404, "conversation_not_found", "Conversation not found");
+  }
+  return conversation;
+}
+
+async function getRunOwned(userId: string, runId: string): Promise<StoredRun> {
+  const run = await store.getRunOwned(userId, runId);
+  if (!run) {
+    throw new ApiError(404, "run_not_found", "Run not found");
+  }
+  return run;
+}
+
 async function failRunAndNotify(
   runId: string,
   error: string,
@@ -920,13 +563,11 @@ async function failRunAndNotify(
   knownRun?: StoredRun,
 ): Promise<void> {
   const pending = takePendingRun(runId);
-  const run = knownRun ?? (await kv.get<StoredRun>(runKey(runId))).value;
-  if (!run || isTerminalStatus(run.status)) {
+  const run = knownRun ?? await store.getRun(runId);
+  if (!run || (run.status !== "queued" && run.status !== "in_progress")) {
     return;
   }
-
-  await finalizeFailedRun(run, error, status);
-
+  await store.failRun(runId, error, status);
   if (pending?.clientSocket) {
     sendWsError(pending.clientSocket, error, run.runId, run.conversationId);
   }
@@ -937,119 +578,41 @@ async function completeRunAndNotify(
   knownRun?: StoredRun,
 ): Promise<void> {
   const pending = takePendingRun(message.runId);
-  const run = knownRun ?? (await kv.get<StoredRun>(runKey(message.runId))).value;
-  if (!run || isTerminalStatus(run.status)) {
+  const run = knownRun ?? await store.getRun(message.runId);
+  if (!run || (run.status !== "queued" && run.status !== "in_progress")) {
     return;
   }
-
-  const conversation = await kv.get<ConversationRecord>(conversationKey(run.conversationId));
-  if (!conversation.value) {
-    return;
-  }
-
-  const completedAt = nowIso();
-  const assistantMessageId = crypto.randomUUID();
-  const assistantMessage: MessageRecord = {
-    messageId: assistantMessageId,
-    conversationId: run.conversationId,
-    role: "assistant",
-    content: message.reply,
-    personaId: run.personaId,
-    clientMessageId: null,
-    createdAt: completedAt,
-  };
-
-  const updatedConversation: ConversationRecord = {
-    ...conversation.value,
-    updatedAt: completedAt,
-    lastMessagePreview: previewText(message.reply),
-  };
-
-  const existingState = await getConversationStateRecord(run.conversationId);
-  const updatedState: ConversationStateRecord = {
-    conversationId: run.conversationId,
-    personaId: run.personaId,
-    previousResponseId: message.responseId ?? existingState?.previousResponseId ?? null,
-    lastRunId: run.runId,
-    updatedAt: completedAt,
-  };
-
-  const completedRun: StoredRun = {
-    ...run,
-    status: "completed",
+  const completed = await store.completeRun({
+    runId: message.runId,
     reply: message.reply,
     responseId: message.responseId ?? null,
-    assistantMessageId,
     usage: message.usage,
     raw: message.raw,
     model: message.model ?? null,
-    completedAt,
-  };
-
-  const atomic = kv
-    .atomic()
-    .set(messageKey(assistantMessage.conversationId, assistantMessage.messageId), assistantMessage)
-    .set(
-      messageIndexKey(
-        assistantMessage.conversationId,
-        assistantMessage.createdAt,
-        assistantMessage.messageId,
-      ),
-      assistantMessage,
-    )
-    .set(runKey(completedRun.runId), completedRun)
-    .set(
-      runIndexKey(completedRun.conversationId, completedRun.createdAt, completedRun.runId),
-      completedRun,
-    )
-    .set(conversationKey(updatedConversation.conversationId), updatedConversation)
-    .set(
-      conversationIndexKey(
-        updatedConversation.userId,
-        updatedConversation.personaId,
-        updatedConversation.updatedAt,
-        updatedConversation.conversationId,
-      ),
-      updatedConversation,
-    )
-    .set(conversationStateKey(updatedState.conversationId), updatedState);
-  if (conversation.value.updatedAt !== updatedConversation.updatedAt) {
-    atomic.delete(
-      conversationIndexKey(
-        conversation.value.userId,
-        conversation.value.personaId,
-        conversation.value.updatedAt,
-        conversation.value.conversationId,
-      ),
-    );
+  });
+  if (!completed) {
+    return;
   }
-  await atomic.commit();
-  await releaseConversationActiveRun(run.conversationId, run.runId);
-
   if (pending?.clientSocket) {
     sendJson(pending.clientSocket, {
       type: "response",
-      runId: run.runId,
-      conversationId: run.conversationId,
-      personaId: run.personaId,
-      assistantMessageId,
-      responseId: completedRun.responseId ?? null,
-      reply: message.reply,
-      model: completedRun.model ?? null,
-      usage: completedRun.usage ?? null,
-      status: completedRun.status,
-      raw: completedRun.raw ?? null,
+      runId: completed.run.runId,
+      conversationId: completed.run.conversationId,
+      personaId: completed.run.personaId,
+      assistantMessageId: completed.assistantMessage.messageId,
+      responseId: completed.run.responseId ?? null,
+      reply: completed.assistantMessage.content,
+      model: completed.run.model ?? null,
+      usage: completed.run.usage ?? null,
+      status: completed.run.status,
+      raw: completed.run.raw ?? null,
     });
   }
 }
 
 function assertWorkerOwnsRun(connection: AgentConnection, run: StoredRun): void {
   if (!connection.worker) {
-    throw new ApiError(
-      400,
-      "worker_not_registered",
-      "Worker must register before sending run updates",
-    );
+    throw new ApiError(400, "worker_not_registered", "Worker must register before sending run updates");
   }
   if (!run.agentInstanceId || run.agentInstanceId !== connection.worker.instanceId) {
     throw new ApiError(409, "run_not_owned_by_worker", "Run is assigned to a different worker");
@@ -1066,179 +629,65 @@ async function queueConversationRun(input: {
   agentId?: string;
   clientSocket?: WebSocket | null;
 }): Promise<{ runId: string; conversationId: string; userMessageId: string; status: RunStatus }> {
-  const dedupeKeyValue = messageDedupeKey(
-    input.userId,
-    input.conversation.conversationId,
-    input.clientMessageId,
-  );
-  const activeRunKeyValue = conversationActiveRunKey(input.conversation.conversationId);
-  const dedupe = await kv.get<MessageDedupeRecord>(dedupeKeyValue);
-  if (dedupe.value) {
-    const existingRun = await kv.get<StoredRun>(runKey(dedupe.value.runId));
-    return {
-      runId: dedupe.value.runId,
-      conversationId: input.conversation.conversationId,
-      userMessageId: dedupe.value.messageId,
-      status: existingRun.value?.status ?? "queued",
-    };
-  }
-
-  const activeRun = await kv.get<ActiveRunRecord>(activeRunKeyValue);
-  if (activeRun.value) {
-    throw new ApiError(409, "conversation_busy", "A run is already active for this conversation");
-  }
-
   const workerConnection = pickLiveWorkerConnection(input.conversation.personaId, input.agentId);
   if (!workerConnection?.worker) {
     throw new ApiError(503, "persona_unavailable", "No worker is available for this persona");
   }
 
-  const currentState = await getConversationStateRecord(input.conversation.conversationId);
-  const createdAt = nowIso();
-  const runId = crypto.randomUUID();
-  const userMessageId = crypto.randomUUID();
-  const userMessage: MessageRecord = {
-    messageId: userMessageId,
-    conversationId: input.conversation.conversationId,
-    role: "user",
-    content: input.text,
-    personaId: input.conversation.personaId,
-    clientMessageId: input.clientMessageId,
-    createdAt,
-  };
+  let queued;
+  try {
+    queued = await store.queueRun({
+      conversation: input.conversation,
+      userId: input.userId,
+      text: input.text,
+      clientMessageId: input.clientMessageId,
+      assignedAgentInstanceId: workerConnection.worker.instanceId,
+    });
+  } catch (error) {
+    mapStoreError(error);
+  }
 
-  const title = input.conversation.lastMessagePreview
-    ? input.conversation.title
-    : defaultConversationTitle(input.text);
-
-  const updatedConversation: ConversationRecord = {
-    ...input.conversation,
-    title,
-    updatedAt: createdAt,
-    lastMessagePreview: previewText(input.text),
-  };
-
-  const queuedRun: StoredRun = {
-    runId,
-    conversationId: input.conversation.conversationId,
-    personaId: input.conversation.personaId,
-    agentInstanceId: workerConnection.worker.instanceId,
-    status: "queued",
-    prompt: input.text,
-    createdAt,
-  };
-
-  const updatedState: ConversationStateRecord = {
-    conversationId: input.conversation.conversationId,
-    personaId: input.conversation.personaId,
-    previousResponseId: currentState?.previousResponseId ?? null,
-    lastRunId: runId,
-    updatedAt: createdAt,
-  };
-
-  const dedupeValue: MessageDedupeRecord = {
-    userId: input.userId,
-    conversationId: input.conversation.conversationId,
-    clientMessageId: input.clientMessageId,
-    runId,
-    messageId: userMessageId,
-    createdAt,
-  };
-  const activeRunValue: ActiveRunRecord = {
-    runId,
-    conversationId: input.conversation.conversationId,
-    createdAt,
-  };
+  if (queued.deduped) {
+    return {
+      runId: queued.run.runId,
+      conversationId: queued.run.conversationId,
+      userMessageId: queued.userMessageId,
+      status: queued.run.status,
+    };
+  }
 
   try {
-    const atomic = kv
-      .atomic()
-      .check(dedupe)
-      .check(activeRun)
-      .set(messageKey(userMessage.conversationId, userMessage.messageId), userMessage)
-      .set(
-        messageIndexKey(userMessage.conversationId, userMessage.createdAt, userMessage.messageId),
-        userMessage,
-      )
-      .set(runKey(queuedRun.runId), queuedRun)
-      .set(runIndexKey(queuedRun.conversationId, queuedRun.createdAt, queuedRun.runId), queuedRun)
-      .set(activeRunKeyValue, activeRunValue)
-      .set(conversationKey(updatedConversation.conversationId), updatedConversation)
-      .set(
-        conversationIndexKey(
-          updatedConversation.userId,
-          updatedConversation.personaId,
-          updatedConversation.updatedAt,
-          updatedConversation.conversationId,
-        ),
-        updatedConversation,
-      )
-      .set(conversationStateKey(updatedState.conversationId), updatedState)
-      .set(dedupeKeyValue, dedupeValue);
-    if (input.conversation.updatedAt !== updatedConversation.updatedAt) {
-      atomic.delete(
-        conversationIndexKey(
-          input.conversation.userId,
-          input.conversation.personaId,
-          input.conversation.updatedAt,
-          input.conversation.conversationId,
-        ),
-      );
-    }
-    const commitResult = await atomic.commit();
-    if (!commitResult.ok) {
-      const latestDedupe = await kv.get<MessageDedupeRecord>(dedupeKeyValue);
-      if (latestDedupe.value) {
-        const existingRun = await kv.get<StoredRun>(runKey(latestDedupe.value.runId));
-        return {
-          runId: latestDedupe.value.runId,
-          conversationId: input.conversation.conversationId,
-          userMessageId: latestDedupe.value.messageId,
-          status: existingRun.value?.status ?? "queued",
-        };
-      }
-      throw new ApiError(409, "conversation_busy", "A run is already active for this conversation");
-    }
-
     createPendingRun(
-      runId,
-      input.conversation.conversationId,
+      queued.run.runId,
+      queued.run.conversationId,
       workerConnection.socket,
       input.clientSocket ?? null,
     );
-
     sendJson(workerConnection.socket, {
       type: "prompt",
-      runId,
-      conversationId: input.conversation.conversationId,
-      personaId: input.conversation.personaId,
+      runId: queued.run.runId,
+      conversationId: queued.run.conversationId,
+      personaId: queued.run.personaId,
       prompt: input.text,
-      sessionId: input.sessionId ?? input.conversation.conversationId,
+      sessionId: input.sessionId ?? queued.run.conversationId,
       continuity: {
-        previousResponseId: currentState?.previousResponseId ?? null,
+        previousResponseId: queued.previousResponseId,
       },
       metadata: {
         ...input.metadata,
         clientMessageId: input.clientMessageId,
       },
     });
-
-    const startedRun: StoredRun = {
-      ...queuedRun,
-      status: "in_progress",
-    };
-    await saveRun(startedRun);
-  } catch (error) {
-    await failRunAndNotify(runId, "Failed to dispatch run to worker");
-    throw error instanceof ApiError
-      ? error
-      : new ApiError(503, "persona_unavailable", "Failed to dispatch run to worker");
+    await store.markRunInProgress(queued.run.runId);
+  } catch {
+    await failRunAndNotify(queued.run.runId, "Failed to dispatch run to worker");
+    throw new ApiError(503, "persona_unavailable", "Failed to dispatch run to worker");
   }
 
   return {
-    runId,
-    conversationId: input.conversation.conversationId,
-    userMessageId,
+    runId: queued.run.runId,
+    conversationId: queued.run.conversationId,
+    userMessageId: queued.userMessageId,
     status: "queued",
   };
 }
@@ -1251,11 +700,7 @@ async function registerAgentConnection(
     throw new ApiError(400, "invalid_request", "agent_register requires agentId and instanceId");
   }
   if (!arePersonasAllowed(connection.allowedPersonaIds, message.personaIds)) {
-    throw new ApiError(
-      403,
-      "forbidden_persona_registration",
-      "Worker tried to register forbidden persona",
-    );
+    throw new ApiError(403, "forbidden_persona_registration", "Worker tried to register forbidden persona");
   }
 
   if (connection.worker?.instanceId && connection.worker.instanceId !== message.instanceId) {
@@ -1263,15 +708,15 @@ async function registerAgentConnection(
     agentConnectionsByInstanceId.delete(connection.worker.instanceId);
   }
 
-  const supersededConnection = agentConnectionsByInstanceId.get(message.instanceId);
-  if (supersededConnection && supersededConnection !== connection) {
-    if (supersededConnection.worker) {
-      unregisterWorker(workerRegistry, supersededConnection.worker.instanceId);
+  const superseded = agentConnectionsByInstanceId.get(message.instanceId);
+  if (superseded && superseded !== connection) {
+    if (superseded.worker) {
+      unregisterWorker(workerRegistry, superseded.worker.instanceId);
     }
     agentConnectionsByInstanceId.delete(message.instanceId);
-    supersededConnection.worker = null;
+    superseded.worker = null;
     try {
-      supersededConnection.socket.close(1012, "superseded");
+      superseded.socket.close(1012, "superseded");
     } catch {
       // Ignore close failures on a dying socket.
     }
@@ -1283,44 +728,24 @@ async function registerAgentConnection(
     personaIds: message.personaIds,
     capabilities: message.capabilities ?? {},
   };
-
   connection.worker = worker;
   connection.version = message.version ?? null;
   connection.lastHeartbeatAt = nowIso();
 
   registerWorker(workerRegistry, worker);
   agentConnectionsByInstanceId.set(worker.instanceId, connection);
-
   await Promise.all([
-    ...worker.personaIds.map((personaId) => ensurePersonaRecord(personaId)),
-    kv.set(agentInstanceKey(worker.instanceId), {
-      instanceId: worker.instanceId,
-      agentId: worker.agentId,
-      personaIds: worker.personaIds,
-      capabilities: worker.capabilities ?? {},
-      version: message.version ?? null,
-      status: "online",
-      connectedAt: connection.connectedAt,
-      lastHeartbeatAt: connection.lastHeartbeatAt,
-    }),
+    ...worker.personaIds.map((personaId) => store.ensurePersonaRecord(personaId)),
+    store.saveAgentInstance(buildAgentInstanceRecord(connection)!),
   ]);
 }
 
 async function markAgentHeartbeat(connection: AgentConnection): Promise<void> {
   connection.lastHeartbeatAt = nowIso();
-  if (!connection.worker) {
-    return;
+  const record = buildAgentInstanceRecord(connection);
+  if (record) {
+    await store.saveAgentInstance(record);
   }
-  await kv.set(agentInstanceKey(connection.worker.instanceId), {
-    instanceId: connection.worker.instanceId,
-    agentId: connection.worker.agentId,
-    personaIds: connection.worker.personaIds,
-    capabilities: connection.worker.capabilities ?? {},
-    version: connection.version,
-    status: "online",
-    connectedAt: connection.connectedAt,
-    lastHeartbeatAt: connection.lastHeartbeatAt,
-  });
 }
 
 async function unregisterAgentConnection(socket: WebSocket, reason: string): Promise<void> {
@@ -1328,13 +753,12 @@ async function unregisterAgentConnection(socket: WebSocket, reason: string): Pro
   if (!connection) {
     return;
   }
-
   agentConnectionsBySocket.delete(socket);
 
   if (connection.worker) {
     unregisterWorker(workerRegistry, connection.worker.instanceId);
     agentConnectionsByInstanceId.delete(connection.worker.instanceId);
-    await kv.set(agentInstanceKey(connection.worker.instanceId), {
+    await store.saveAgentInstance({
       instanceId: connection.worker.instanceId,
       agentId: connection.worker.agentId,
       personaIds: connection.worker.personaIds,
@@ -1348,11 +772,9 @@ async function unregisterAgentConnection(socket: WebSocket, reason: string): Pro
     });
   }
 
-  const affectedRuns = [...pendingRuns.values()]
-    .filter((pending) => pending.agentSocket === socket)
-    .map((pending) => pending.runId);
-  for (const runId of affectedRuns) {
-    await failRunAndNotify(runId, "Agent disconnected");
+  const affectedRuns = [...pendingRuns.values()].filter((pending) => pending.agentSocket === socket);
+  for (const pending of affectedRuns) {
+    await failRunAndNotify(pending.runId, "Agent disconnected");
   }
 }
 
@@ -1395,15 +817,11 @@ async function handleAgentSocket(req: Request): Promise<Response> {
         }
 
         if (!connection.worker) {
-          throw new ApiError(
-            400,
-            "worker_not_registered",
-            "Worker must register before sending run updates",
-          );
+          throw new ApiError(400, "worker_not_registered", "Worker must register before sending updates");
         }
 
         await markAgentHeartbeat(connection);
-        const run = (await kv.get<StoredRun>(runKey(message.runId))).value;
+        const run = await store.getRun(message.runId);
         if (!run) {
           throw new ApiError(404, "run_not_found", "Run not found");
         }
@@ -1414,11 +832,9 @@ async function handleAgentSocket(req: Request): Promise<Response> {
         }
         await failRunAndNotify(message.runId, message.error, "failed", run);
       } catch (error) {
-        const apiError = error instanceof ApiError ? error : new ApiError(
-          400,
-          "invalid_request",
-          error instanceof Error ? error.message : "Unhandled agent error",
-        );
+        const apiError = error instanceof ApiError
+          ? error
+          : new ApiError(400, "invalid_request", error instanceof Error ? error.message : "Unhandled agent error");
         try {
           sendJson(socket, { type: "error", error: apiError.code, message: apiError.message });
         } catch {
@@ -1438,7 +854,6 @@ async function handleAgentSocket(req: Request): Promise<Response> {
   socket.onclose = () => {
     void unregisterAgentConnection(socket, "closed");
   };
-
   socket.onerror = () => {
     void unregisterAgentConnection(socket, "error");
   };
@@ -1453,14 +868,10 @@ async function handleClientWsPrompt(
 ): Promise<void> {
   const conversation = payload.conversationId
     ? await getConversationOwned(userId, payload.conversationId)
-    : await createConversation(
+    : await store.createConversation(
       userId,
       payload.target?.personaId ?? (() => {
-        throw new ApiError(
-          400,
-          "persona_id_required",
-          "target.personaId is required when conversationId is absent",
-        );
+        throw new ApiError(400, "persona_id_required", "target.personaId is required when conversationId is absent");
       })(),
       payload.title,
     );
@@ -1488,14 +899,10 @@ async function handleClientWsPrompt(
 function handleClientSocket(req: Request): Response {
   const userId = getOptionalWsUserId(req);
   if (!userId) {
-    return json(
-      { error: "missing_user_id", message: `Provide ${USER_HEADER} header or ?userId=` },
-      401,
-    );
+    return json({ error: "missing_user_id", message: `Provide ${USER_HEADER} header or ?userId=` }, 401);
   }
 
   const { socket, response } = Deno.upgradeWebSocket(req);
-
   socket.onmessage = (event) => {
     if (typeof event.data !== "string") {
       sendWsError(socket, "Only text frames are supported");
@@ -1506,24 +913,15 @@ function handleClientSocket(req: Request): Response {
         const payload = parseClientPrompt(event.data);
         await handleClientWsPrompt(socket, userId, payload);
       } catch (error) {
-        const apiError = error instanceof ApiError ? error : new ApiError(
-          400,
-          "invalid_request",
-          error instanceof Error ? error.message : "Unhandled client error",
-        );
+        const apiError = error instanceof ApiError
+          ? error
+          : new ApiError(400, "invalid_request", error instanceof Error ? error.message : "Unhandled client error");
         sendWsError(socket, apiError.message);
       }
     })();
   };
-
-  socket.onclose = () => {
-    detachClientSocket(socket);
-  };
-
-  socket.onerror = () => {
-    detachClientSocket(socket);
-  };
-
+  socket.onclose = () => detachClientSocket(socket);
+  socket.onerror = () => detachClientSocket(socket);
   return response;
 }
 
@@ -1535,7 +933,7 @@ async function handleCreateConversation(req: Request): Promise<Response> {
     throw new ApiError(400, "persona_id_required", "personaId is required");
   }
   const title = normalizeString(body.title) ?? undefined;
-  const conversation = await createConversation(userId, personaId, title);
+  const conversation = await store.createConversation(userId, personaId, title);
   return json(conversation, 201);
 }
 
@@ -1546,8 +944,7 @@ async function handleContinueLastConversation(req: Request): Promise<Response> {
   if (!personaId) {
     throw new ApiError(400, "persona_id_required", "personaId is required");
   }
-  const conversation = await continueLastConversation(userId, personaId);
-  return json(conversation);
+  return json(await store.continueLastConversation(userId, personaId));
 }
 
 async function handleListConversations(req: Request): Promise<Response> {
@@ -1557,18 +954,17 @@ async function handleListConversations(req: Request): Promise<Response> {
   if (!personaId) {
     throw new ApiError(400, "persona_id_required", "personaId query parameter is required");
   }
-  const limit = Math.min(Number(url.searchParams.get("limit") ?? "20") || 20, 100);
-  return json(await listConversations(userId, personaId, limit));
+  const limit = Math.max(1, Math.min(Number(url.searchParams.get("limit") ?? "20") || 20, 100));
+  return json(await store.listConversations(userId, personaId, limit));
 }
 
 async function handleConversationMessages(req: Request, conversationId: string): Promise<Response> {
   const userId = getRequiredUserId(req);
   const conversation = await getConversationOwned(userId, conversationId);
-
   if (req.method === "GET") {
     return json({
       conversation,
-      messages: await listMessages(conversationId),
+      messages: await store.listMessages(conversationId),
     });
   }
 
@@ -1578,18 +974,16 @@ async function handleConversationMessages(req: Request, conversationId: string):
     throw new ApiError(400, "invalid_request", "text must be a non-empty string");
   }
 
-  const clientMessageId = normalizeString(body.clientMessageId) ?? crypto.randomUUID();
   const accepted = await queueConversationRun({
     conversation,
     userId,
     text,
-    clientMessageId,
+    clientMessageId: normalizeString(body.clientMessageId) ?? crypto.randomUUID(),
     metadata: normalizeJsonObject(body.metadata),
     sessionId: normalizeString(body.sessionId) ?? undefined,
     agentId: normalizeString(body.agentId) ?? undefined,
     clientSocket: null,
   });
-
   return json(accepted, 202);
 }
 
@@ -1624,6 +1018,20 @@ Deno.serve({ hostname: HOST, port: PORT }, async (req) => {
 
   const url = new URL(req.url);
 
+  const adminResponse = await handleAdminRequest(req, url, { store });
+  if (adminResponse) {
+    return adminResponse;
+  }
+
+  const knowledgeResponse = await handleKnowledgeRequest(req, url, {
+    store,
+    sharedSecret: AGENT_TOOL_SHARED_SECRET,
+    defaultSearchLimit: KNOWLEDGE_SEARCH_LIMIT,
+  });
+  if (knowledgeResponse) {
+    return knowledgeResponse;
+  }
+
   try {
     if (url.pathname === "/healthz" && req.method === "GET") {
       return json({
@@ -1631,9 +1039,11 @@ Deno.serve({ hostname: HOST, port: PORT }, async (req) => {
         agentConnections: agentConnectionsBySocket.size,
         registeredAgents: agentConnectionsByInstanceId.size,
         pendingRuns: pendingRuns.size,
-        personasOnline: [...workerRegistry.personaBuckets.entries()].filter(([, bucket]) =>
-          bucket.length
-        ).map(([personaId]) => personaId),
+        personasOnline: [...workerRegistry.personaBuckets.entries()].filter(([, bucket]) => bucket.length).map(([personaId]) => personaId),
+        adminConfigured: Boolean(
+          Deno.env.get("ADMIN_PASSWORD_HASH")?.trim() && Deno.env.get("ADMIN_SESSION_SECRET")?.trim(),
+        ),
+        knowledgeConfigured: Boolean(AGENT_TOOL_SHARED_SECRET),
       });
     }
 
@@ -1673,7 +1083,7 @@ Deno.serve({ hostname: HOST, port: PORT }, async (req) => {
 
     if (url.pathname === "/" && req.method === "GET") {
       return json({
-        name: "deno-relay",
+        name: "deno-relay-control-plane",
         publicApis: [
           "GET /v1/personas",
           "GET /v1/conversations?personaId=...",
@@ -1682,6 +1092,9 @@ Deno.serve({ hostname: HOST, port: PORT }, async (req) => {
           "GET /v1/conversations/{conversationId}/messages",
           "POST /v1/conversations/{conversationId}/messages",
           "GET /v1/runs/{runId}",
+          "POST /v1/admin/login",
+          "POST /v1/knowledge/search",
+          "POST /v1/knowledge/upsert",
         ],
         sockets: {
           client: "/ws",
