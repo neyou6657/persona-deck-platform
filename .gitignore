@@ -1,0 +1,39 @@
+.cc-connect/
+.deno/
+.deno.zip
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+*.tmp
+*.swp
+*.swo
+.DS_Store
+
+# Local virtualenvs
+.venv/
+venv/
+
+# Node / frontend
+node_modules/
+dist/
+build/
+.gradle/
+.idea/
+local.properties
+
+# Python / generated outputs
+generated/
+proxyip.yaml
+proxyip-report.json
+fofa_proxyip_export.py
+test_fofa_proxyip_export.py
+
+# Unrelated nested repo / experiments
+CF-Workers-CheckProxyIP/
+
+# Worktree storage
+.worktrees/
+worktrees/
+
