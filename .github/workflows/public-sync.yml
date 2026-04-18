@@ -1,0 +1,19 @@
+name: Public Export
+
+on:
+  workflow_dispatch:
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Export public workspace
+        run: bash scripts/export_public_repo.sh public-export
+
+      - name: Upload public export artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-repo-export
+          path: public-export

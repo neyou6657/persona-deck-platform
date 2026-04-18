@@ -12,6 +12,9 @@ __pycache__/
 *.swp
 *.swo
 .DS_Store
+.env
+.env.*
+!.env.example
 
 # Local virtualenvs
 .venv/
@@ -41,3 +44,4 @@ CF-Workers-CheckProxyIP/
 # Worktree storage
 .worktrees/
 worktrees/
+.public-export/
