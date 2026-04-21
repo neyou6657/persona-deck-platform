@@ -3,11 +3,16 @@ package me.rerere.rikkahub.ui.pages.relay
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -39,6 +44,7 @@ import me.rerere.hugeicons.HugeIcons
 import me.rerere.hugeicons.stroke.Refresh01
 import me.rerere.rikkahub.data.relay.RelayMessageDto
 import me.rerere.rikkahub.ui.components.nav.BackButton
+import me.rerere.rikkahub.ui.hooks.rememberImeAwareBottomInset
 import me.rerere.rikkahub.ui.theme.CustomColors
 import org.koin.androidx.compose.koinViewModel
 import org.koin.core.parameter.parametersOf
@@ -72,6 +78,7 @@ fun RelayChatPage(
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
     val listState = rememberLazyListState()
     var input by rememberSaveable { mutableStateOf("") }
+    val inputBottomInset = rememberImeAwareBottomInset()
 
     LaunchedEffect(messages.value.size) {
         if (messages.value.isNotEmpty()) {
@@ -80,6 +87,7 @@ fun RelayChatPage(
     }
 
     Scaffold(
+        contentWindowInsets = WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal),
         topBar = {
             LargeFlexibleTopAppBar(
                 title = { Text(resolvedTitle.value) },
@@ -100,7 +108,9 @@ fun RelayChatPage(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .padding(horizontal = 16.dp, vertical = 12.dp),
+                .consumeWindowInsets(innerPadding)
+                .padding(horizontal = 16.dp)
+                .padding(top = 12.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Card(modifier = Modifier.fillMaxWidth()) {
@@ -174,7 +184,9 @@ fun RelayChatPage(
             }
 
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 12.dp + inputBottomInset),
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalAlignment = Alignment.Bottom,
             ) {

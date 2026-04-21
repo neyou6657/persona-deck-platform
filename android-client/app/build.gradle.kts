@@ -16,7 +16,7 @@ android {
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "me.rerere.rikkahub"
+        applicationId = "cc.persona.deck"
         minSdk = 26
         targetSdk = 36
         versionCode = 150

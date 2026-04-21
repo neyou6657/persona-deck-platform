@@ -35,7 +35,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.isImeVisible
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
@@ -143,6 +142,7 @@ import me.rerere.rikkahub.ui.context.LocalNavController
 import me.rerere.rikkahub.ui.context.LocalSettings
 import me.rerere.rikkahub.ui.context.LocalToaster
 import me.rerere.rikkahub.ui.hooks.ChatInputState
+import me.rerere.rikkahub.ui.hooks.rememberImeAwareBottomInset
 import org.koin.compose.koinInject
 import java.io.File
 import kotlin.time.Duration.Companion.seconds
@@ -366,6 +366,7 @@ fun ChatInput(
 
     // Collapse when ime is visible
     val imeVisile = WindowInsets.isImeVisible
+    val inputBottomInset = rememberImeAwareBottomInset()
     LaunchedEffect(imeVisile, showInjectionSheet, showCompressDialog) {
         if (imeVisile && !showInjectionSheet && !showCompressDialog) {
             dismissExpand()
@@ -377,8 +378,7 @@ fun ChatInput(
     ) {
         Column(
             modifier = modifier
-                .imePadding()
-                .navigationBarsPadding()
+                .padding(bottom = inputBottomInset)
                 .padding(horizontal = 8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
