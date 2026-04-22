@@ -37,7 +37,7 @@ jobs:
         working-directory: android-client
         run: |
           mkdir -p preview-dist
-          cp app/build/outputs/apk/debug/app-debug.apk preview-dist/persona-deck-debug.apk
+          cp app/build/outputs/apk/debug/app-universal-debug.apk preview-dist/persona-deck-debug.apk
           cp app/build/outputs/apk/debug/output-metadata.json preview-dist/output-metadata.json
           tar -C app -cf preview-dist/persona-deck-buildpack.tar build
 
