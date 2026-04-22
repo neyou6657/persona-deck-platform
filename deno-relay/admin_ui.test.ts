@@ -4,6 +4,16 @@ import { buildApiDocsPayload, renderAdminPage } from "./admin_ui.ts";
 
 const textDecoder = new TextDecoder();
 
+function extractInlineModuleScript(body: string): string {
+  const startMarker = '<script type="module">';
+  const start = body.indexOf(startMarker);
+  const end = body.indexOf("</script>", start);
+  if (start < 0 || end < 0) {
+    throw new Error("inline admin module script is missing");
+  }
+  return body.slice(start + startMarker.length, end);
+}
+
 Deno.test("renderAdminPage returns login-first admin console html", async () => {
   const response = renderAdminPage();
   const body = textDecoder.decode(await response.arrayBuffer());
@@ -17,6 +27,14 @@ Deno.test("renderAdminPage returns login-first admin console html", async () => 
   assertStringIncludes(body, "/v1/admin/agents");
   assertStringIncludes(body, "Agent 控制");
   assertStringIncludes(body, "知识库");
+});
+
+Deno.test("renderAdminPage emits parsable inline admin script", async () => {
+  const response = renderAdminPage();
+  const body = textDecoder.decode(await response.arrayBuffer());
+  const script = extractInlineModuleScript(body);
+
+  new Function(script);
 });
 
 Deno.test("buildApiDocsPayload keeps public API summary available outside root", () => {

@@ -820,7 +820,7 @@ export function renderAdminPage(): Response {
             temperature: Number(agentTemperatureInputEl.value || "0.2"),
             store: agentStoreInputEl.checked,
             systemPrompt: agentSystemPromptInputEl.value,
-            enabledSkills: agentSkillsInputEl.value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean),
+            enabledSkills: agentSkillsInputEl.value.split(/\\r?\\n/).map((item) => item.trim()).filter(Boolean),
           };
           const hasPersistedConfig = state.agentConfigs.some((item) => item.agentId === agentId);
           if (state.selectedAgentId && state.selectedAgentId === agentId && hasPersistedConfig) {
