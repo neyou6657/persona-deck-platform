@@ -1,8 +1,8 @@
 import {
-  createAdminAuthConfigFromEnv,
-  issueAdminSession,
   type AdminAuthConfig,
   AdminAuthError,
+  createAdminAuthConfigFromEnv,
+  issueAdminSession,
   requireAdminSession,
   revokeAdminSession,
   verifyAdminPassword,
@@ -48,6 +48,32 @@ function normalizeJsonObject(value: unknown): JsonObject {
   return {};
 }
 
+function normalizeStringArray(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.filter((item): item is string =>
+      typeof item === "string" && item.trim().length > 0
+    ).map((item) => item.trim());
+  }
+  if (typeof value === "string" && value.trim()) {
+    return value
+      .split(/\r?\n|,/g)
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+  return [];
+}
+
+function normalizeNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
 async function readJsonObject(req: Request): Promise<Record<string, unknown>> {
   let value: unknown;
   try {
@@ -78,7 +104,9 @@ function parseTimestampMs(value: string | null | undefined): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-function normalizeAgentInstances(records: Awaited<ReturnType<ControlPlaneStore["listAgentInstances"]>>) {
+function normalizeAgentInstances(
+  records: Awaited<ReturnType<ControlPlaneStore["listAgentInstances"]>>,
+) {
   return records.map((record) => ({
     ...record,
     status: record.status === "online" &&
@@ -151,6 +179,100 @@ export async function handleAdminRequest(
       });
     }
 
+    if (url.pathname === "/v1/admin/agents" && req.method === "GET") {
+      const agentInstances = normalizeAgentInstances(await options.store.listAgentInstances());
+      return json({
+        agentConfigs: await options.store.listAgentConfigs(),
+        agentInstances,
+      });
+    }
+
+    if (url.pathname === "/v1/admin/agents" && req.method === "POST") {
+      const body = await readJsonObject(req);
+      const agentId = normalizeString(body.agentId);
+      if (!agentId) {
+        throw new AdminRouteError(400, "agent_id_required", "agentId is required");
+      }
+      const configRecord = await options.store.upsertAgentConfig({
+        agentId,
+        runtime: normalizeString(body.runtime) ?? undefined,
+        model: normalizeString(body.model) ?? undefined,
+        apiBaseUrl: typeof body.apiBaseUrl === "string" ? body.apiBaseUrl : undefined,
+        apiKey: typeof body.apiKey === "string" ? body.apiKey : undefined,
+        systemPrompt: typeof body.systemPrompt === "string" ? body.systemPrompt : undefined,
+        temperature: normalizeNumber(body.temperature) ?? undefined,
+        store: typeof body.store === "boolean" ? body.store : undefined,
+        enabledSkills: normalizeStringArray(body.enabledSkills),
+      });
+      return json(configRecord, 201);
+    }
+
+    const agentMatch = url.pathname.match(/^\/v1\/admin\/agents\/([^/]+)$/);
+    if (agentMatch && (req.method === "GET" || req.method === "PATCH")) {
+      const agentId = decodeURIComponent(agentMatch[1]);
+      if (req.method === "GET") {
+        const agentInstances = normalizeAgentInstances(await options.store.listAgentInstances())
+          .filter((item) => item.agentId === agentId);
+        const storedConfig = await options.store.getAgentConfig(agentId);
+        if (!storedConfig && !agentInstances.length) {
+          throw new AdminRouteError(404, "agent_config_not_found", "Agent config not found");
+        }
+        const configRecord = storedConfig ?? {
+          agentId,
+          runtime: normalizeString(agentInstances[0]?.capabilities?.runtime) ?? "codex_cli",
+          model: normalizeString(agentInstances[0]?.capabilities?.model) ?? "",
+          apiBaseUrl: normalizeString(agentInstances[0]?.capabilities?.apiBaseUrl) ?? "",
+          apiKey: "",
+          systemPrompt: "",
+          temperature: normalizeNumber(agentInstances[0]?.capabilities?.temperature) ?? 0.2,
+          store: typeof agentInstances[0]?.capabilities?.store === "boolean"
+            ? agentInstances[0].capabilities.store
+            : true,
+          enabledSkills: normalizeStringArray(agentInstances[0]?.capabilities?.enabledSkills),
+          restartGeneration:
+            normalizeNumber(agentInstances[0]?.capabilities?.observedRestartGeneration) ?? 0,
+          updatedAt: new Date().toISOString(),
+        };
+        return json({
+          config: configRecord,
+          instances: agentInstances,
+        });
+      }
+
+      const current = await options.store.getAgentConfig(agentId);
+      if (!current) {
+        throw new AdminRouteError(404, "agent_config_not_found", "Agent config not found");
+      }
+      const body = await readJsonObject(req);
+      return json(
+        await options.store.upsertAgentConfig({
+          agentId,
+          runtime: normalizeString(body.runtime) ?? current.runtime,
+          model: normalizeString(body.model) ?? current.model,
+          apiBaseUrl: typeof body.apiBaseUrl === "string" ? body.apiBaseUrl : current.apiBaseUrl,
+          apiKey: typeof body.apiKey === "string" ? body.apiKey : current.apiKey,
+          systemPrompt: typeof body.systemPrompt === "string"
+            ? body.systemPrompt
+            : current.systemPrompt,
+          temperature: normalizeNumber(body.temperature) ?? current.temperature,
+          store: typeof body.store === "boolean" ? body.store : current.store,
+          enabledSkills: Object.hasOwn(body, "enabledSkills")
+            ? normalizeStringArray(body.enabledSkills)
+            : current.enabledSkills,
+        }),
+      );
+    }
+
+    const agentRestartMatch = url.pathname.match(/^\/v1\/admin\/agents\/([^/]+)\/restart$/);
+    if (agentRestartMatch && req.method === "POST") {
+      const agentId = decodeURIComponent(agentRestartMatch[1]);
+      const current = await options.store.getAgentConfig(agentId);
+      if (!current) {
+        throw new AdminRouteError(404, "agent_config_not_found", "Agent config not found");
+      }
+      return json(await options.store.restartAgentConfig(agentId));
+    }
+
     if (url.pathname === "/v1/admin/personas" && req.method === "POST") {
       const body = await readJsonObject(req);
       const personaId = normalizeString(body.personaId);
@@ -202,7 +324,10 @@ export async function handleAdminRequest(
     if (knowledgeListMatch && (req.method === "GET" || req.method === "POST")) {
       const personaId = decodeURIComponent(knowledgeListMatch[1]);
       if (req.method === "GET") {
-        const limit = Math.max(1, Math.min(Number(url.searchParams.get("limit") ?? "50") || 50, 100));
+        const limit = Math.max(
+          1,
+          Math.min(Number(url.searchParams.get("limit") ?? "50") || 50, 100),
+        );
         return json({
           personaId,
           docs: await options.store.listKnowledgeDocs(personaId, limit),

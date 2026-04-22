@@ -74,6 +74,20 @@ export type AgentInstanceRecord = {
   disconnectReason?: string | null;
 };
 
+export type AgentConfigRecord = {
+  agentId: string;
+  runtime: string;
+  model: string;
+  apiBaseUrl: string;
+  apiKey: string;
+  systemPrompt: string;
+  temperature: number;
+  store: boolean;
+  enabledSkills: string[];
+  restartGeneration: number;
+  updatedAt: string;
+};
+
 export type KnowledgeDocRecord = {
   docId: string;
   personaId: string;
@@ -123,6 +137,18 @@ export type QueueRunResult = {
   previousResponseId: string | null;
 };
 
+export type UpsertAgentConfigInput = {
+  agentId: string;
+  runtime?: string;
+  model?: string;
+  apiBaseUrl?: string;
+  apiKey?: string;
+  systemPrompt?: string;
+  temperature?: number;
+  store?: boolean;
+  enabledSkills?: string[];
+};
+
 export type ClaimRunInput = {
   instanceId: string;
   agentId: string;
@@ -159,7 +185,11 @@ export type ControlPlaneStore = {
   upsertPersona(input: UpsertPersonaInput): Promise<PersonaRecord>;
   getPersona(personaId: string): Promise<PersonaRecord | null>;
   listPersonas(): Promise<PersonaRecord[]>;
-  createConversation(userId: string, personaId: string, title?: string): Promise<ConversationRecord>;
+  createConversation(
+    userId: string,
+    personaId: string,
+    title?: string,
+  ): Promise<ConversationRecord>;
   continueLastConversation(userId: string, personaId: string): Promise<ConversationRecord>;
   listConversations(
     userId: string,
@@ -174,11 +204,13 @@ export type ControlPlaneStore = {
   markRunInProgress(runId: string): Promise<void>;
   getRun(runId: string): Promise<StoredRun | null>;
   getRunOwned(userId: string, runId: string): Promise<StoredRun | null>;
-  completeRun(input: CompleteRunInput): Promise<{
-    run: StoredRun;
-    assistantMessage: MessageRecord;
-    conversation: ConversationRecord;
-  } | null>;
+  completeRun(input: CompleteRunInput): Promise<
+    {
+      run: StoredRun;
+      assistantMessage: MessageRecord;
+      conversation: ConversationRecord;
+    } | null
+  >;
   failRun(
     runId: string,
     error: string,
@@ -187,6 +219,10 @@ export type ControlPlaneStore = {
   recoverInterruptedRuns(reason: string): Promise<StoredRun[]>;
   saveAgentInstance(record: AgentInstanceRecord): Promise<void>;
   listAgentInstances(): Promise<AgentInstanceRecord[]>;
+  upsertAgentConfig(input: UpsertAgentConfigInput): Promise<AgentConfigRecord>;
+  getAgentConfig(agentId: string): Promise<AgentConfigRecord | null>;
+  listAgentConfigs(): Promise<AgentConfigRecord[]>;
+  restartAgentConfig(agentId: string): Promise<AgentConfigRecord>;
   listKnowledgeDocs(personaId: string, limit: number): Promise<KnowledgeDocRecord[]>;
   searchKnowledge(
     personaId: string,
@@ -276,13 +312,17 @@ function normalizeMetadata(value: unknown): JsonObject {
 
 function normalizeStringArrayValue(value: unknown): string[] {
   if (Array.isArray(value)) {
-    return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+    return value.filter((item): item is string =>
+      typeof item === "string" && item.trim().length > 0
+    );
   }
   if (typeof value === "string" && value.trim()) {
     try {
       const parsed = JSON.parse(value);
       if (Array.isArray(parsed)) {
-        return parsed.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+        return parsed.filter((item): item is string =>
+          typeof item === "string" && item.trim().length > 0
+        );
       }
     } catch {
       // Fall through and treat as a single string value.
@@ -305,6 +345,17 @@ function normalizeAgentInstanceRecord(
   };
 }
 
+function normalizeAgentConfigRecord(
+  row: Omit<AgentConfigRecord, "enabledSkills"> & {
+    enabledSkills: unknown;
+  },
+): AgentConfigRecord {
+  return {
+    ...row,
+    enabledSkills: normalizeStringArrayValue(row.enabledSkills),
+  };
+}
+
 function toJson(value: unknown): string {
   return JSON.stringify(value ?? null);
 }
@@ -323,9 +374,13 @@ class MemoryControlPlaneStore implements ControlPlaneStore {
   private conversationStates = new Map<string, ConversationStateRecord>();
   private messages = new Map<string, MessageRecord[]>();
   private runs = new Map<string, StoredRun>();
-  private activeRuns = new Map<string, { conversationId: string; runId: string; createdAt: string }>();
+  private activeRuns = new Map<
+    string,
+    { conversationId: string; runId: string; createdAt: string }
+  >();
   private dedupes = new Map<string, { runId: string; messageId: string }>();
   private agentInstances = new Map<string, AgentInstanceRecord>();
+  private agentConfigs = new Map<string, AgentConfigRecord>();
   private knowledgeDocs = new Map<string, KnowledgeDocRecord>();
   private adminSessions = new Map<string, AdminSessionRecord>();
 
@@ -388,7 +443,9 @@ class MemoryControlPlaneStore implements ControlPlaneStore {
   }
 
   async listPersonas(): Promise<PersonaRecord[]> {
-    return [...this.personas.values()].sort((left, right) => left.personaId.localeCompare(right.personaId));
+    return [...this.personas.values()].sort((left, right) =>
+      left.personaId.localeCompare(right.personaId)
+    );
   }
 
   async createConversation(
@@ -422,7 +479,9 @@ class MemoryControlPlaneStore implements ControlPlaneStore {
 
   async continueLastConversation(userId: string, personaId: string): Promise<ConversationRecord> {
     const existing = sortedConversations(
-      [...this.conversations.values()].filter((item) => item.userId === userId && item.personaId === personaId),
+      [...this.conversations.values()].filter((item) =>
+        item.userId === userId && item.personaId === personaId
+      ),
     )[0];
     return existing ?? await this.createConversation(userId, personaId);
   }
@@ -433,7 +492,9 @@ class MemoryControlPlaneStore implements ControlPlaneStore {
     limit: number,
   ): Promise<ConversationRecord[]> {
     return sortedConversations(
-      [...this.conversations.values()].filter((item) => item.userId === userId && item.personaId === personaId),
+      [...this.conversations.values()].filter((item) =>
+        item.userId === userId && item.personaId === personaId
+      ),
     ).slice(0, limit);
   }
 
@@ -457,7 +518,8 @@ class MemoryControlPlaneStore implements ControlPlaneStore {
   }
 
   async queueRun(input: QueueRunInput): Promise<QueueRunResult> {
-    const dedupeKey = `${input.userId}:${input.conversation.conversationId}:${input.clientMessageId}`;
+    const dedupeKey =
+      `${input.userId}:${input.conversation.conversationId}:${input.clientMessageId}`;
     const dedupe = this.dedupes.get(dedupeKey);
     if (dedupe) {
       const run = this.runs.get(dedupe.runId);
@@ -469,7 +531,8 @@ class MemoryControlPlaneStore implements ControlPlaneStore {
         run,
         userMessageId: dedupe.messageId,
         previousResponseId:
-          this.conversationStates.get(input.conversation.conversationId)?.previousResponseId ?? null,
+          this.conversationStates.get(input.conversation.conversationId)?.previousResponseId ??
+            null,
       };
     }
 
@@ -502,7 +565,9 @@ class MemoryControlPlaneStore implements ControlPlaneStore {
     };
     const conversation: ConversationRecord = {
       ...input.conversation,
-      title: input.conversation.lastMessagePreview ? input.conversation.title : defaultConversationTitle(input.text),
+      title: input.conversation.lastMessagePreview
+        ? input.conversation.title
+        : defaultConversationTitle(input.text),
       updatedAt: createdAt,
       lastMessagePreview: previewText(input.text),
     };
@@ -513,7 +578,10 @@ class MemoryControlPlaneStore implements ControlPlaneStore {
       lastRunId: runId,
       updatedAt: createdAt,
     };
-    this.messages.set(message.conversationId, [...(this.messages.get(message.conversationId) ?? []), message]);
+    this.messages.set(message.conversationId, [
+      ...(this.messages.get(message.conversationId) ?? []),
+      message,
+    ]);
     this.runs.set(runId, run);
     this.conversations.set(conversation.conversationId, conversation);
     this.conversationStates.set(state.conversationId, state);
@@ -563,8 +631,9 @@ class MemoryControlPlaneStore implements ControlPlaneStore {
     this.runs.set(candidate.runId, claimed);
     return {
       run: claimed,
-      previousResponseId: this.conversationStates.get(candidate.conversationId)?.previousResponseId ??
-        null,
+      previousResponseId:
+        this.conversationStates.get(candidate.conversationId)?.previousResponseId ??
+          null,
     };
   }
 
@@ -584,11 +653,13 @@ class MemoryControlPlaneStore implements ControlPlaneStore {
     return run;
   }
 
-  async completeRun(input: CompleteRunInput): Promise<{
-    run: StoredRun;
-    assistantMessage: MessageRecord;
-    conversation: ConversationRecord;
-  } | null> {
+  async completeRun(input: CompleteRunInput): Promise<
+    {
+      run: StoredRun;
+      assistantMessage: MessageRecord;
+      conversation: ConversationRecord;
+    } | null
+  > {
     const run = this.runs.get(input.runId);
     if (!run || isTerminalStatus(run.status)) {
       return null;
@@ -626,7 +697,8 @@ class MemoryControlPlaneStore implements ControlPlaneStore {
     const state: ConversationStateRecord = {
       conversationId: run.conversationId,
       personaId: run.personaId,
-      previousResponseId: input.responseId ?? this.conversationStates.get(run.conversationId)?.previousResponseId ?? null,
+      previousResponseId: input.responseId ??
+        this.conversationStates.get(run.conversationId)?.previousResponseId ?? null,
       lastRunId: run.runId,
       updatedAt: completedAt,
     };
@@ -696,6 +768,53 @@ class MemoryControlPlaneStore implements ControlPlaneStore {
     );
   }
 
+  async upsertAgentConfig(input: UpsertAgentConfigInput): Promise<AgentConfigRecord> {
+    const current = this.agentConfigs.get(input.agentId);
+    const record: AgentConfigRecord = {
+      agentId: input.agentId,
+      runtime: input.runtime?.trim() || current?.runtime || "codex_cli",
+      model: input.model?.trim() || current?.model || "gpt-5.3-codex",
+      apiBaseUrl: input.apiBaseUrl !== undefined
+        ? input.apiBaseUrl.trim()
+        : current?.apiBaseUrl ?? "",
+      apiKey: input.apiKey?.trim() ?? current?.apiKey ?? "",
+      systemPrompt: input.systemPrompt?.trim() ?? current?.systemPrompt ?? "",
+      temperature: typeof input.temperature === "number"
+        ? input.temperature
+        : current?.temperature ?? 0.2,
+      store: typeof input.store === "boolean" ? input.store : current?.store ?? true,
+      enabledSkills: input.enabledSkills ?? current?.enabledSkills ?? [],
+      restartGeneration: current?.restartGeneration ?? 0,
+      updatedAt: nowIso(),
+    };
+    this.agentConfigs.set(record.agentId, record);
+    return record;
+  }
+
+  async getAgentConfig(agentId: string): Promise<AgentConfigRecord | null> {
+    return this.agentConfigs.get(agentId) ?? null;
+  }
+
+  async listAgentConfigs(): Promise<AgentConfigRecord[]> {
+    return [...this.agentConfigs.values()].sort((left, right) =>
+      left.agentId.localeCompare(right.agentId)
+    );
+  }
+
+  async restartAgentConfig(agentId: string): Promise<AgentConfigRecord> {
+    const current = this.agentConfigs.get(agentId);
+    if (!current) {
+      throw new StoreError("agent_config_not_found");
+    }
+    const record: AgentConfigRecord = {
+      ...current,
+      restartGeneration: current.restartGeneration + 1,
+      updatedAt: nowIso(),
+    };
+    this.agentConfigs.set(agentId, record);
+    return record;
+  }
+
   async listKnowledgeDocs(personaId: string, limit: number): Promise<KnowledgeDocRecord[]> {
     return sortedKnowledge(
       [...this.knowledgeDocs.values()].filter((doc) => doc.personaId === personaId),
@@ -759,7 +878,10 @@ class MemoryControlPlaneStore implements ControlPlaneStore {
     return this.adminSessions.get(sessionIdHash) ?? null;
   }
 
-  async touchAdminSession(sessionIdHash: string, expiresAt: string): Promise<AdminSessionRecord | null> {
+  async touchAdminSession(
+    sessionIdHash: string,
+    expiresAt: string,
+  ): Promise<AdminSessionRecord | null> {
     const existing = this.adminSessions.get(sessionIdHash);
     if (!existing) {
       return null;
@@ -792,7 +914,8 @@ class PostgresControlPlaneStore implements ControlPlaneStore {
       const current = await this.getPersona(persona.personaId);
       await this.upsertPersona({
         personaId: persona.personaId,
-        displayName: persona.displayName?.trim() || current?.displayName || defaultPersonaDisplayName(persona.personaId),
+        displayName: persona.displayName?.trim() || current?.displayName ||
+          defaultPersonaDisplayName(persona.personaId),
         description: persona.description?.trim() ?? current?.description ?? "",
         enabled: persona.enabled ?? current?.enabled ?? true,
         metadata: persona.metadata ?? current?.metadata ?? {},
@@ -1405,11 +1528,13 @@ class PostgresControlPlaneStore implements ControlPlaneStore {
     return row ?? null;
   }
 
-  async completeRun(input: CompleteRunInput): Promise<{
-    run: StoredRun;
-    assistantMessage: MessageRecord;
-    conversation: ConversationRecord;
-  } | null> {
+  async completeRun(input: CompleteRunInput): Promise<
+    {
+      run: StoredRun;
+      assistantMessage: MessageRecord;
+      conversation: ConversationRecord;
+    } | null
+  > {
     return await this.sql.begin(async (tx: any) => {
       const [run] = await tx`
         select
@@ -1743,6 +1868,141 @@ class PostgresControlPlaneStore implements ControlPlaneStore {
     return rows.map(normalizeAgentInstanceRecord);
   }
 
+  async upsertAgentConfig(input: UpsertAgentConfigInput): Promise<AgentConfigRecord> {
+    const current = await this.getAgentConfig(input.agentId);
+    const runtime = input.runtime?.trim() || current?.runtime || "codex_cli";
+    const model = input.model?.trim() || current?.model || "gpt-5.3-codex";
+    const apiBaseUrl = input.apiBaseUrl !== undefined
+      ? input.apiBaseUrl.trim()
+      : current?.apiBaseUrl ?? "";
+    const apiKey = input.apiKey?.trim() ?? current?.apiKey ?? "";
+    const systemPrompt = input.systemPrompt?.trim() ?? current?.systemPrompt ?? "";
+    const temperature = typeof input.temperature === "number"
+      ? input.temperature
+      : current?.temperature ?? 0.2;
+    const store = typeof input.store === "boolean" ? input.store : current?.store ?? true;
+    const enabledSkills = input.enabledSkills ?? current?.enabledSkills ?? [];
+    const restartGeneration = current?.restartGeneration ?? 0;
+
+    const [row] = await this.sql`
+      insert into agent_configs (
+        agent_id,
+        runtime,
+        model,
+        api_base_url,
+        api_key,
+        system_prompt,
+        temperature,
+        store,
+        enabled_skills,
+        restart_generation,
+        updated_at
+      ) values (
+        ${input.agentId},
+        ${runtime},
+        ${model},
+        ${apiBaseUrl},
+        ${apiKey},
+        ${systemPrompt},
+        ${temperature},
+        ${store},
+        ${toJson(enabledSkills)}::jsonb,
+        ${restartGeneration},
+        now()
+      )
+      on conflict (agent_id) do update set
+        runtime = excluded.runtime,
+        model = excluded.model,
+        api_base_url = excluded.api_base_url,
+        api_key = excluded.api_key,
+        system_prompt = excluded.system_prompt,
+        temperature = excluded.temperature,
+        store = excluded.store,
+        enabled_skills = excluded.enabled_skills,
+        updated_at = now()
+      returning
+        agent_id as "agentId",
+        runtime,
+        model,
+        api_base_url as "apiBaseUrl",
+        api_key as "apiKey",
+        system_prompt as "systemPrompt",
+        temperature,
+        store,
+        enabled_skills as "enabledSkills",
+        restart_generation as "restartGeneration",
+        updated_at::text as "updatedAt"
+    `;
+    return normalizeAgentConfigRecord(row);
+  }
+
+  async getAgentConfig(agentId: string): Promise<AgentConfigRecord | null> {
+    const [row] = await this.sql`
+      select
+        agent_id as "agentId",
+        runtime,
+        model,
+        api_base_url as "apiBaseUrl",
+        api_key as "apiKey",
+        system_prompt as "systemPrompt",
+        temperature,
+        store,
+        enabled_skills as "enabledSkills",
+        restart_generation as "restartGeneration",
+        updated_at::text as "updatedAt"
+      from agent_configs
+      where agent_id = ${agentId}
+      limit 1
+    `;
+    return row ? normalizeAgentConfigRecord(row) : null;
+  }
+
+  async listAgentConfigs(): Promise<AgentConfigRecord[]> {
+    const rows = await this.sql`
+      select
+        agent_id as "agentId",
+        runtime,
+        model,
+        api_base_url as "apiBaseUrl",
+        api_key as "apiKey",
+        system_prompt as "systemPrompt",
+        temperature,
+        store,
+        enabled_skills as "enabledSkills",
+        restart_generation as "restartGeneration",
+        updated_at::text as "updatedAt"
+      from agent_configs
+      order by agent_id asc
+    `;
+    return rows.map(normalizeAgentConfigRecord);
+  }
+
+  async restartAgentConfig(agentId: string): Promise<AgentConfigRecord> {
+    const [row] = await this.sql`
+      update agent_configs
+      set
+        restart_generation = restart_generation + 1,
+        updated_at = now()
+      where agent_id = ${agentId}
+      returning
+        agent_id as "agentId",
+        runtime,
+        model,
+        api_base_url as "apiBaseUrl",
+        api_key as "apiKey",
+        system_prompt as "systemPrompt",
+        temperature,
+        store,
+        enabled_skills as "enabledSkills",
+        restart_generation as "restartGeneration",
+        updated_at::text as "updatedAt"
+    `;
+    if (!row) {
+      throw new StoreError("agent_config_not_found");
+    }
+    return normalizeAgentConfigRecord(row);
+  }
+
   async listKnowledgeDocs(personaId: string, limit: number): Promise<KnowledgeDocRecord[]> {
     return await this.sql`
       select
@@ -1878,7 +2138,10 @@ class PostgresControlPlaneStore implements ControlPlaneStore {
     return row ?? null;
   }
 
-  async touchAdminSession(sessionIdHash: string, expiresAt: string): Promise<AdminSessionRecord | null> {
+  async touchAdminSession(
+    sessionIdHash: string,
+    expiresAt: string,
+  ): Promise<AdminSessionRecord | null> {
     const [row] = await this.sql`
       update admin_sessions
       set

@@ -67,8 +67,36 @@ def _count_skills(root: Path) -> int:
             count += 1
     return count
 
+def _list_skill_names(root: Path) -> list[str]:
+    if not root.exists():
+        return []
+    return sorted(
+        child.name
+        for child in root.iterdir()
+        if child.is_dir() and (child / "SKILL.md").exists()
+    )
 
-def sync_skills(config: SkillsBootstrapConfig | None = None) -> dict[str, Any]:
+
+def _materialize_enabled_skills(source_dir: Path, target_dir: Path, enabled_skills: list[str] | None) -> list[str]:
+    if target_dir.exists():
+        shutil.rmtree(target_dir)
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    available = _list_skill_names(source_dir)
+    if enabled_skills is None:
+        shutil.copytree(source_dir, target_dir, dirs_exist_ok=True)
+        return available
+
+    enabled = [skill for skill in enabled_skills if skill in available]
+    for skill in enabled:
+        shutil.copytree(source_dir / skill, target_dir / skill, dirs_exist_ok=True)
+    return enabled
+
+
+def sync_skills(
+    config: SkillsBootstrapConfig | None = None,
+    enabled_skills: list[str] | None = None,
+) -> dict[str, Any]:
     cfg = config or SkillsBootstrapConfig.from_env()
     target_dir = cfg.codex_home / "skills"
     report: dict[str, Any] = {
@@ -106,10 +134,11 @@ def sync_skills(config: SkillsBootstrapConfig | None = None) -> dict[str, Any]:
             f"skills source directory not found: {source_dir} (repo_subdir={cfg.repo_subdir})"
         )
 
-    if target_dir.exists():
-        shutil.rmtree(target_dir)
-    shutil.copytree(source_dir, target_dir)
+    available_skills = _list_skill_names(source_dir)
+    active_skills = _materialize_enabled_skills(source_dir, target_dir, enabled_skills)
 
     report["status"] = "ok"
     report["skills_count"] = _count_skills(target_dir)
+    report["available_skills"] = available_skills
+    report["enabled_skills"] = active_skills
     return report

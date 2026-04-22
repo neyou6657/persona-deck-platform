@@ -325,6 +325,67 @@ export function renderAdminPage(): Response {
           <div class="panel">
             <div class="panel-body stack">
               <div class="row between">
+                <h2 class="section-title">Agent 控制</h2>
+                <span class="hint">这里直接控模型、端点、密钥、激活 skills，然后一键重启。</span>
+              </div>
+              <div id="agentList" class="persona-list">
+                <div class="empty">还没有 agent 配置。等 worker 连上来，或者你先手动建一个。</div>
+              </div>
+              <div class="two-up">
+                <label>
+                  Agent ID
+                  <input id="agentIdInput" type="text" placeholder="例如 hf-space-coder-v1" />
+                </label>
+                <label>
+                  Runtime
+                  <input id="agentRuntimeInput" type="text" placeholder="codex_cli 或 responses" />
+                </label>
+              </div>
+              <div class="two-up">
+                <label>
+                  Model
+                  <input id="agentModelInput" type="text" placeholder="例如 gpt-5.4" />
+                </label>
+                <label>
+                  Endpoint
+                  <input id="agentEndpointInput" type="text" placeholder="https://your-endpoint/v1" />
+                </label>
+              </div>
+              <div class="two-up">
+                <label>
+                  API Key
+                  <input id="agentApiKeyInput" type="password" placeholder="sk-..." />
+                </label>
+                <label>
+                  Temperature
+                  <input id="agentTemperatureInput" type="number" min="0" max="2" step="0.1" placeholder="0.2" />
+                </label>
+              </div>
+              <label class="row">
+                <input id="agentStoreInput" type="checkbox" checked />
+                <span>Store responses</span>
+              </label>
+              <label>
+                System Prompt
+                <textarea id="agentSystemPromptInput" placeholder="给 agent 的系统提示词"></textarea>
+              </label>
+              <label>
+                Enabled Skills
+                <textarea id="agentSkillsInput" placeholder="每行一个 skill slug，例如&#10;restart&#10;project-audit"></textarea>
+              </label>
+              <div id="agentAvailableSkills" class="hint">当前还没有上报可用 skills。</div>
+              <div id="agentInstancesHint" class="hint">当前还没有观测到这个 agent 的实例。</div>
+              <div class="row">
+                <button id="saveAgentButton" type="button">保存 Agent 配置</button>
+                <button id="restartAgentButton" class="danger" type="button">保存并重启 Agent</button>
+                <button id="newAgentButton" class="secondary" type="button">新建 Agent 草稿</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-body stack">
+              <div class="row between">
                 <h2 class="section-title">人格编辑</h2>
                 <span class="hint">支持创建新人格，也支持更新已选人格。</span>
               </div>
@@ -397,6 +458,9 @@ export function renderAdminPage(): Response {
         token: localStorage.getItem("personaDeckAdminToken") || "",
         selectedPersonaId: "",
         personas: [],
+        selectedAgentId: "",
+        agentConfigs: [],
+        agentInstances: [],
       };
 
       const statusEl = document.getElementById("status");
@@ -409,8 +473,23 @@ export function renderAdminPage(): Response {
       const refreshButtonEl = document.getElementById("refreshButton");
       const newPersonaButtonEl = document.getElementById("newPersonaButton");
       const personaListEl = document.getElementById("personaList");
+      const agentListEl = document.getElementById("agentList");
       const knowledgeListEl = document.getElementById("knowledgeList");
       const knowledgeHintEl = document.getElementById("knowledgeHint");
+      const agentIdInputEl = document.getElementById("agentIdInput");
+      const agentRuntimeInputEl = document.getElementById("agentRuntimeInput");
+      const agentModelInputEl = document.getElementById("agentModelInput");
+      const agentEndpointInputEl = document.getElementById("agentEndpointInput");
+      const agentApiKeyInputEl = document.getElementById("agentApiKeyInput");
+      const agentTemperatureInputEl = document.getElementById("agentTemperatureInput");
+      const agentStoreInputEl = document.getElementById("agentStoreInput");
+      const agentSystemPromptInputEl = document.getElementById("agentSystemPromptInput");
+      const agentSkillsInputEl = document.getElementById("agentSkillsInput");
+      const agentAvailableSkillsEl = document.getElementById("agentAvailableSkills");
+      const agentInstancesHintEl = document.getElementById("agentInstancesHint");
+      const saveAgentButtonEl = document.getElementById("saveAgentButton");
+      const restartAgentButtonEl = document.getElementById("restartAgentButton");
+      const newAgentButtonEl = document.getElementById("newAgentButton");
       const personaIdInputEl = document.getElementById("personaIdInput");
       const displayNameInputEl = document.getElementById("displayNameInput");
       const descriptionInputEl = document.getElementById("descriptionInput");
@@ -512,6 +591,48 @@ export function renderAdminPage(): Response {
         }).join("");
       }
 
+      function buildAgentRows() {
+        const rows = new Map();
+        state.agentInstances.forEach((instance) => {
+          const current = rows.get(instance.agentId) || { agentId: instance.agentId, config: null, instances: [] };
+          current.instances.push(instance);
+          rows.set(instance.agentId, current);
+        });
+        state.agentConfigs.forEach((config) => {
+          const current = rows.get(config.agentId) || { agentId: config.agentId, config: null, instances: [] };
+          current.config = config;
+          rows.set(config.agentId, current);
+        });
+        return Array.from(rows.values()).sort((left, right) => left.agentId.localeCompare(right.agentId));
+      }
+
+      function renderAgentList() {
+        const rows = buildAgentRows();
+        if (!rows.length) {
+          agentListEl.innerHTML = '<div class="empty">还没有 agent 配置。等 worker 连上来，或者你先手动建一个。</div>';
+          return;
+        }
+        agentListEl.innerHTML = rows.map((row) => {
+          const active = row.agentId === state.selectedAgentId ? " active" : "";
+          const onlineCount = row.instances.filter((item) => item.status === "online").length;
+          const observedModel = row.instances[0]?.capabilities?.model || row.config?.model || "未配置";
+          const enabledSkills = Array.isArray(row.config?.enabledSkills) ? row.config.enabledSkills.length : 0;
+          return '<article class="persona-item' + active + '">' +
+            '<div class="row between">' +
+              '<strong>' + escapeHtml(row.agentId) + '</strong>' +
+              '<span class="badge ' + (onlineCount ? "enabled" : "disabled") + '">' +
+                (onlineCount ? ('Online x' + onlineCount) : 'Offline') +
+              '</span>' +
+            '</div>' +
+            '<span class="persona-meta">Model: ' + escapeHtml(observedModel) + '</span>' +
+            '<p>已配置 skills：' + enabledSkills + ' 个。别让 agent 裸奔。</p>' +
+            '<div class="row">' +
+              '<button type="button" data-agent-select="' + escapeAttribute(row.agentId) + '">打开</button>' +
+            '</div>' +
+          '</article>';
+        }).join("");
+      }
+
       function renderKnowledgeList(docs) {
         if (!docs.length) {
           knowledgeListEl.innerHTML = '<div class="empty">这个人格还没有知识文档。</div>';
@@ -541,6 +662,21 @@ export function renderAdminPage(): Response {
         knowledgeListEl.innerHTML = '<div class="empty">新人格还没有知识文档。</div>';
       }
 
+      function resetAgentForm() {
+        state.selectedAgentId = "";
+        agentIdInputEl.value = "";
+        agentRuntimeInputEl.value = "codex_cli";
+        agentModelInputEl.value = "";
+        agentEndpointInputEl.value = "";
+        agentApiKeyInputEl.value = "";
+        agentTemperatureInputEl.value = "0.2";
+        agentStoreInputEl.checked = true;
+        agentSystemPromptInputEl.value = "";
+        agentSkillsInputEl.value = "";
+        agentAvailableSkillsEl.textContent = "当前还没有上报可用 skills。";
+        agentInstancesHintEl.textContent = "当前还没有观测到这个 agent 的实例。";
+      }
+
       function resetKnowledgeForm() {
         docTitleInputEl.value = "";
         docSourceInputEl.value = "";
@@ -563,6 +699,22 @@ export function renderAdminPage(): Response {
         }
       }
 
+      async function loadAgents(preserveSelection = true) {
+        const payload = await api("/v1/admin/agents");
+        state.agentConfigs = Array.isArray(payload.agentConfigs) ? payload.agentConfigs : [];
+        state.agentInstances = Array.isArray(payload.agentInstances) ? payload.agentInstances : [];
+        const rows = buildAgentRows();
+        if (!preserveSelection || !rows.some((item) => item.agentId === state.selectedAgentId)) {
+          state.selectedAgentId = rows[0]?.agentId || "";
+        }
+        renderAgentList();
+        if (state.selectedAgentId) {
+          await loadAgentDetail(state.selectedAgentId);
+        } else {
+          resetAgentForm();
+        }
+      }
+
       async function loadPersonaDetail(personaId) {
         const payload = await api("/v1/admin/personas/" + encodeURIComponent(personaId));
         const persona = payload.persona;
@@ -576,6 +728,32 @@ export function renderAdminPage(): Response {
         knowledgeHintEl.textContent = "当前人格：" + persona.personaId;
         renderKnowledgeList(knowledge);
         renderPersonaList(state.personas);
+      }
+
+      async function loadAgentDetail(agentId) {
+        const payload = await api("/v1/admin/agents/" + encodeURIComponent(agentId));
+        const config = payload.config;
+        const instances = Array.isArray(payload.instances) ? payload.instances : [];
+        state.selectedAgentId = config.agentId;
+        agentIdInputEl.value = config.agentId || "";
+        agentRuntimeInputEl.value = config.runtime || "codex_cli";
+        agentModelInputEl.value = config.model || "";
+        agentEndpointInputEl.value = config.apiBaseUrl || "";
+        agentApiKeyInputEl.value = config.apiKey || "";
+        agentTemperatureInputEl.value = String(config.temperature ?? 0.2);
+        agentStoreInputEl.checked = Boolean(config.store);
+        agentSystemPromptInputEl.value = config.systemPrompt || "";
+        agentSkillsInputEl.value = Array.isArray(config.enabledSkills) ? config.enabledSkills.join("\\n") : "";
+        const availableSkills = Array.from(new Set(instances.flatMap((instance) => Array.isArray(instance.capabilities?.availableSkills)
+          ? instance.capabilities.availableSkills
+          : [])));
+        agentAvailableSkillsEl.textContent = availableSkills.length
+          ? ("可用 skills: " + availableSkills.join(", "))
+          : "当前 worker 还没上报可用 skills。";
+        agentInstancesHintEl.textContent = instances.length
+          ? instances.map((item) => item.instanceId + " / " + item.status).join(" ; ")
+          : "当前还没有观测到这个 agent 的实例。";
+        renderAgentList();
       }
 
       async function login() {
@@ -596,8 +774,9 @@ export function renderAdminPage(): Response {
           setLoggedInUi(true);
           setStatus("登录成功，管理台已经接管。", "ok");
           passwordInputEl.value = "";
+          resetAgentForm();
           resetKnowledgeForm();
-          await loadPersonas(false);
+          await Promise.all([loadAgents(false), loadPersonas(false)]);
         } catch (error) {
           setStatus(error.message || "登录失败", "error");
         } finally {
@@ -617,8 +796,73 @@ export function renderAdminPage(): Response {
           localStorage.removeItem("personaDeckAdminToken");
           setLoggedInUi(false);
           setStatus("已退出。现在首页又是文明世界了。");
+          resetAgentForm();
           resetPersonaForm();
           resetKnowledgeForm();
+        }
+      }
+
+      async function saveAgentConfig() {
+        const agentId = agentIdInputEl.value.trim();
+        if (!agentId) {
+          setStatus("Agent ID 不能为空。", "error");
+          return null;
+        }
+        saveAgentButtonEl.disabled = true;
+        restartAgentButtonEl.disabled = true;
+        try {
+          const payload = {
+            agentId,
+            runtime: agentRuntimeInputEl.value.trim() || "codex_cli",
+            model: agentModelInputEl.value.trim(),
+            apiBaseUrl: agentEndpointInputEl.value.trim(),
+            apiKey: agentApiKeyInputEl.value,
+            temperature: Number(agentTemperatureInputEl.value || "0.2"),
+            store: agentStoreInputEl.checked,
+            systemPrompt: agentSystemPromptInputEl.value,
+            enabledSkills: agentSkillsInputEl.value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean),
+          };
+          const hasPersistedConfig = state.agentConfigs.some((item) => item.agentId === agentId);
+          if (state.selectedAgentId && state.selectedAgentId === agentId && hasPersistedConfig) {
+            await api("/v1/admin/agents/" + encodeURIComponent(agentId), {
+              method: "PATCH",
+              body: JSON.stringify(payload),
+            });
+          } else {
+            await api("/v1/admin/agents", {
+              method: "POST",
+              body: JSON.stringify(payload),
+            });
+          }
+          state.selectedAgentId = agentId;
+          setStatus("Agent 配置已保存。", "ok");
+          await loadAgents(true);
+          return agentId;
+        } catch (error) {
+          setStatus(error.message || "保存 Agent 配置失败", "error");
+          return null;
+        } finally {
+          saveAgentButtonEl.disabled = false;
+          restartAgentButtonEl.disabled = false;
+        }
+      }
+
+      async function restartAgentConfig() {
+        const agentId = await saveAgentConfig();
+        if (!agentId) {
+          return;
+        }
+        restartAgentButtonEl.disabled = true;
+        try {
+          await api("/v1/admin/agents/" + encodeURIComponent(agentId) + "/restart", {
+            method: "POST",
+          });
+          setStatus("Agent 已要求重启。剩下的交给它自己，不用你去 Space 里搬砖。", "ok");
+          await loadAgents(true);
+        } catch (error) {
+          setStatus(error.message || "重启 Agent 失败", "error");
+        } finally {
+          restartAgentButtonEl.disabled = false;
         }
       }
 
@@ -730,6 +974,11 @@ export function renderAdminPage(): Response {
           await loadPersonaDetail(personaId);
           return;
         }
+        const agentId = target.getAttribute("data-agent-select");
+        if (agentId) {
+          await loadAgentDetail(agentId);
+          return;
+        }
         const docId = target.getAttribute("data-doc-delete");
         if (docId) {
           await deleteKnowledge(docId);
@@ -740,12 +989,21 @@ export function renderAdminPage(): Response {
       logoutButtonEl.addEventListener("click", logout);
       refreshButtonEl.addEventListener("click", async () => {
         try {
-          await loadPersonas(true);
+          await Promise.all([loadAgents(true), loadPersonas(true)]);
           setStatus("列表已刷新。", "ok");
         } catch (error) {
           setStatus(error.message || "刷新失败", "error");
         }
       });
+      newAgentButtonEl.addEventListener("click", () => {
+        resetAgentForm();
+        renderAgentList();
+        setStatus("新 Agent 草稿已就位。", "ok");
+      });
+      saveAgentButtonEl.addEventListener("click", async () => {
+        await saveAgentConfig();
+      });
+      restartAgentButtonEl.addEventListener("click", restartAgentConfig);
       newPersonaButtonEl.addEventListener("click", () => {
         resetPersonaForm();
         renderPersonaList(state.personas);
@@ -771,7 +1029,7 @@ export function renderAdminPage(): Response {
           await api("/v1/admin/session");
           setLoggedInUi(true);
           setStatus("已恢复上次会话。", "ok");
-          await loadPersonas(false);
+          await Promise.all([loadAgents(false), loadPersonas(false)]);
         } catch {
           await logout();
         }

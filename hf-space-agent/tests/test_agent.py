@@ -144,7 +144,11 @@ class AgentClientTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(message["instanceId"], "instance-xyz")
         self.assertEqual(message["personaIds"], ["coder", "reviewer"])
         self.assertEqual(message["version"], "2026-04-18")
-        self.assertEqual(message["capabilities"], {"stream": False, "tools": False})
+        self.assertEqual(message["capabilities"]["stream"], False)
+        self.assertEqual(message["capabilities"]["tools"], False)
+        self.assertEqual(message["capabilities"]["runtime"], client.runtime)
+        self.assertEqual(message["capabilities"]["model"], client.model)
+        self.assertEqual(message["capabilities"]["observedRestartGeneration"], 0)
 
     async def test_generate_uses_official_responses_sdk_and_preserves_session_continuity(self):
         fake_instances = []
@@ -424,6 +428,136 @@ class AgentClientTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(requests[0][0:2], ("POST", "/v1/worker/claim"))
         self.assertEqual(requests[1][0:2], ("POST", "/v1/worker/runs/run-123/response"))
         self.assertEqual(requests[1][2]["reply"], "protocol reply")
+
+    async def test_poll_once_applies_control_restart_config(self):
+        with patch("agent.CodexRunner", side_effect=lambda config: _FakeCodexRunner(config)):
+            client = AgentClient(
+                agent_id="hf-space-coder-v1",
+                instance_id="instance-xyz",
+                persona_ids=["coder"],
+                version="2026-04-18",
+                provider="openai_compatible",
+                runtime="codex_cli",
+                model="gpt-5.3-codex",
+                api_key="old-key",
+                api_base_url="https://old.example/v1",
+                api_kind="responses",
+                timeout_seconds=30,
+                placeholder_enabled=False,
+                temperature=0.2,
+                store=True,
+                system_prompt="old prompt",
+                enabled_skills=["alpha"],
+            )
+
+        bridge = RelayBridge(
+            agent_client=client,
+            relay_ws_url="https://relay.example",
+            relay_secret="secret",
+            reconnect_seconds=1,
+        )
+
+        async def fake_request(method, path, payload=None):
+            if path == "/v1/worker/claim":
+                return {
+                    "type": "control",
+                    "action": "restart",
+                    "agentId": "hf-space-coder-v1",
+                    "restartGeneration": 3,
+                    "config": {
+                        "runtime": "codex_cli",
+                        "model": "gpt-5.4",
+                        "apiBaseUrl": "https://new.example/v1",
+                        "apiKey": "new-key",
+                        "systemPrompt": "new prompt",
+                        "temperature": 0.4,
+                        "store": False,
+                        "enabledSkills": ["beta"],
+                    },
+                }
+            raise AssertionError(f"unexpected path: {path}")
+
+        bridge._request_json = fake_request
+
+        with patch("agent.sync_skills", return_value={
+            "status": "ok",
+            "available_skills": ["alpha", "beta"],
+            "enabled_skills": ["beta"],
+        }):
+            handled = await bridge._poll_once()
+
+        self.assertTrue(handled)
+        self.assertEqual(client.model, "gpt-5.4")
+        self.assertEqual(client.api_base_url, "https://new.example/v1")
+        self.assertEqual(client.api_key, "new-key")
+        self.assertEqual(client.system_prompt, "new prompt")
+        self.assertEqual(client.enabled_skills, ["beta"])
+        self.assertEqual(client.available_skills, ["alpha", "beta"])
+        self.assertEqual(client.observed_restart_generation, 3)
+
+    async def test_poll_once_applies_control_restart_config_can_clear_endpoint_and_key(self):
+        with patch("agent.CodexRunner", side_effect=lambda config: _FakeCodexRunner(config)):
+            client = AgentClient(
+                agent_id="hf-space-coder-v1",
+                instance_id="instance-xyz",
+                persona_ids=["coder"],
+                version="2026-04-18",
+                provider="openai_compatible",
+                runtime="codex_cli",
+                model="gpt-5.3-codex",
+                api_key="old-key",
+                api_base_url="https://old.example/v1",
+                api_kind="responses",
+                timeout_seconds=30,
+                placeholder_enabled=False,
+                temperature=0.2,
+                store=True,
+                system_prompt="old prompt",
+                enabled_skills=["alpha"],
+            )
+
+        bridge = RelayBridge(
+            agent_client=client,
+            relay_ws_url="https://relay.example",
+            relay_secret="secret",
+            reconnect_seconds=1,
+        )
+
+        async def fake_request(method, path, payload=None):
+            if path == "/v1/worker/claim":
+                return {
+                    "type": "control",
+                    "action": "restart",
+                    "agentId": "hf-space-coder-v1",
+                    "restartGeneration": 4,
+                    "config": {
+                        "runtime": "codex_cli",
+                        "model": "gpt-5.4",
+                        "apiBaseUrl": "",
+                        "apiKey": "",
+                        "systemPrompt": "",
+                        "temperature": 0.4,
+                        "store": False,
+                        "enabledSkills": [],
+                    },
+                }
+            raise AssertionError(f"unexpected path: {path}")
+
+        bridge._request_json = fake_request
+
+        with patch("agent.sync_skills", return_value={
+            "status": "ok",
+            "available_skills": ["alpha", "beta"],
+            "enabled_skills": [],
+        }):
+            handled = await bridge._poll_once()
+
+        self.assertTrue(handled)
+        self.assertEqual(client.api_base_url, "")
+        self.assertEqual(client.api_key, "")
+        self.assertEqual(client.system_prompt, "")
+        self.assertEqual(client.enabled_skills, [])
+        self.assertEqual(client.observed_restart_generation, 4)
 
     async def test_relay_prompt_protocol_uses_run_id_persona_and_continuity(self):
         fake_client = _FakeGeneratingClient()

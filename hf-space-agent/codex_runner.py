@@ -44,6 +44,26 @@ class CodexRunnerConfig:
             timeout_seconds=float(os.getenv("CODEX_TIMEOUT_SECONDS", str(default_timeout_seconds))),
         )
 
+    @classmethod
+    def from_runtime(
+        cls,
+        model: str,
+        api_base_url: str,
+        api_key: str,
+        timeout_seconds: float,
+    ) -> "CodexRunnerConfig":
+        return cls(
+            codex_bin=os.getenv("CODEX_BIN", "codex").strip() or "codex",
+            workdir=os.getenv("CODEX_WORKDIR", "/tmp").strip() or "/tmp",
+            codex_home=os.getenv("CODEX_HOME", str(Path.home() / ".codex")).strip() or str(Path.home() / ".codex"),
+            model=model,
+            model_provider=os.getenv("CODEX_MODEL_PROVIDER", "relaygw").strip() or "relaygw",
+            provider_name=os.getenv("CODEX_PROVIDER_NAME", "Relay Gateway").strip() or "Relay Gateway",
+            api_base_url=api_base_url.strip().rstrip("/"),
+            api_key=api_key.strip(),
+            timeout_seconds=timeout_seconds,
+        )
+
 
 def _escape_toml(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')

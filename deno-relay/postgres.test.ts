@@ -154,3 +154,32 @@ Deno.test("completeRun updates previousResponseId on success", async () => {
   assertEquals(state?.previousResponseId, "resp-123");
   await store.close();
 });
+
+Deno.test("agent config persists and restart generation increments only on restart", async () => {
+  const store = createMemoryControlPlaneStore();
+
+  const saved = await store.upsertAgentConfig({
+    agentId: "hf-space-coder-v1",
+    runtime: "codex_cli",
+    model: "gpt-5.4",
+    apiBaseUrl: "https://relay.example/v1",
+    apiKey: "sk-live-secret",
+    systemPrompt: "You are a private coder.",
+    temperature: 0.4,
+    store: true,
+    enabledSkills: ["skill-a", "skill-b"],
+  });
+
+  assertEquals(saved.restartGeneration, 0);
+  assertEquals(saved.enabledSkills, ["skill-a", "skill-b"]);
+
+  const restarted = await store.restartAgentConfig("hf-space-coder-v1");
+  assertEquals(restarted.restartGeneration, 1);
+  assertEquals(restarted.model, "gpt-5.4");
+
+  const reloaded = await store.getAgentConfig("hf-space-coder-v1");
+  assertEquals(reloaded?.restartGeneration, 1);
+  assertEquals(reloaded?.apiKey, "sk-live-secret");
+
+  await store.close();
+});

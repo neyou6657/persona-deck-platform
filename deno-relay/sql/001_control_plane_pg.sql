@@ -97,6 +97,20 @@ create table if not exists agent_instances (
 create index if not exists agent_instances_status_idx
   on agent_instances (status, last_heartbeat_at desc);
 
+create table if not exists agent_configs (
+  agent_id text primary key,
+  runtime text not null default 'codex_cli',
+  model text not null default 'gpt-5.3-codex',
+  api_base_url text not null default '',
+  api_key text not null default '',
+  system_prompt text not null default '',
+  temperature double precision not null default 0.2,
+  store boolean not null default true,
+  enabled_skills jsonb not null default '[]'::jsonb,
+  restart_generation integer not null default 0,
+  updated_at timestamptz not null default now()
+);
+
 create table if not exists admin_sessions (
   session_id_hash text primary key,
   created_at timestamptz not null default now(),

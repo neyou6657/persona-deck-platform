@@ -8,9 +8,10 @@ import {
 import { handleAdminRequest } from "./admin_routes.ts";
 import { buildApiDocsPayload, renderAdminPage } from "./admin_ui.ts";
 import {
-  createPostgresControlPlaneStore,
+  type AgentConfigRecord,
   type AgentInstanceRecord,
   type ConversationRecord,
+  createPostgresControlPlaneStore,
   type JsonObject,
   type PersonaSeed,
   type RunStatus,
@@ -18,8 +19,14 @@ import {
   StoreError,
 } from "./postgres.ts";
 import { handleKnowledgeRequest } from "./knowledge_routes.ts";
-
-type AllowedPersonaScope = "*" | Set<string>;
+import {
+  type AgentTokenPolicy,
+  type AllowedScope,
+  areAllAllowed,
+  bindTokenToAgent,
+  isScopeAllowed,
+  parseAgentTokenPolicies,
+} from "./worker_auth.ts";
 
 type AgentRegisterMessage = {
   type: "agent_register";
@@ -80,7 +87,8 @@ type AgentConnection = {
   connectionId: string;
   socket: WebSocket;
   token: string;
-  allowedPersonaIds: AllowedPersonaScope;
+  allowedPersonaIds: AllowedScope;
+  allowedAgentIds: AllowedScope;
   connectedAt: string;
   lastHeartbeatAt: string;
   worker: WorkerRegistration | null;
@@ -119,6 +127,14 @@ type WorkerRunErrorRequest = {
   conversationId?: string;
   personaId?: string;
   error: string;
+};
+
+type WorkerControlMessage = {
+  type: "control";
+  action: "restart";
+  agentId: string;
+  restartGeneration: number;
+  config: JsonObject;
 };
 
 type QueuedRequestContext = {
@@ -170,7 +186,8 @@ const workerRegistry = createWorkerRegistryState();
 const agentConnectionsBySocket = new Map<WebSocket, AgentConnection>();
 const agentConnectionsByInstanceId = new Map<string, AgentConnection>();
 const pendingRuns = new Map<string, PendingRun>();
-const agentTokenPolicies = parseAgentTokenPolicies();
+const agentTokenPolicies = parseAgentTokenPolicies(AGENT_SHARED_SECRET, AGENT_TOKEN_PERSONAS_JSON);
+const workerTokenBindings = new Map<string, string>();
 
 await store.seedPersonas(parsePersonaCatalog());
 await store.recoverInterruptedRuns(RELAY_RESTART_ERROR);
@@ -185,8 +202,7 @@ function json(data: unknown, status = 200): Response {
     headers: {
       "content-type": "application/json; charset=utf-8",
       "access-control-allow-origin": "*",
-      "access-control-allow-headers":
-        "content-type, authorization, x-user-id, x-knowledge-secret",
+      "access-control-allow-headers": "content-type, authorization, x-user-id, x-knowledge-secret",
       "access-control-allow-methods": "GET, POST, PATCH, DELETE, OPTIONS",
     },
   });
@@ -197,8 +213,7 @@ function noContent(): Response {
     status: 204,
     headers: {
       "access-control-allow-origin": "*",
-      "access-control-allow-headers":
-        "content-type, authorization, x-user-id, x-knowledge-secret",
+      "access-control-allow-headers": "content-type, authorization, x-user-id, x-knowledge-secret",
       "access-control-allow-methods": "GET, POST, PATCH, DELETE, OPTIONS",
     },
   });
@@ -279,11 +294,35 @@ function parseStringArray(value: unknown, fieldName: string): string[] {
   if (!Array.isArray(value) || !value.length) {
     throw new ApiError(400, "invalid_request", `${fieldName} must be a non-empty string array`);
   }
-  const parsed = value.map((item) => normalizeString(item)).filter((item): item is string => Boolean(item));
+  const parsed = value.map((item) => normalizeString(item)).filter((item): item is string =>
+    Boolean(item)
+  );
   if (parsed.length !== value.length) {
     throw new ApiError(400, "invalid_request", `${fieldName} must contain only non-empty strings`);
   }
   return [...new Set(parsed)];
+}
+
+function normalizeStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return [
+    ...new Set(
+      value.map((item) => normalizeString(item)).filter((item): item is string => Boolean(item)),
+    ),
+  ];
+}
+
+function normalizeInteger(value: unknown): number | null {
+  if (typeof value === "number" && Number.isInteger(value)) {
+    return value;
+  }
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number.parseInt(value, 10);
+    return Number.isInteger(parsed) ? parsed : null;
+  }
+  return null;
 }
 
 function sendJson(socket: WebSocket, payload: unknown): void {
@@ -332,7 +371,11 @@ function parseClientPrompt(raw: string): ClientPromptMessage {
   const value = parseJson(raw);
   const prompt = normalizeString(value.prompt);
   if (value.type !== "prompt" || !prompt) {
-    throw new ApiError(400, "invalid_request", 'Client message must be {"type":"prompt","prompt":"..."}');
+    throw new ApiError(
+      400,
+      "invalid_request",
+      'Client message must be {"type":"prompt","prompt":"..."}',
+    );
   }
   let target: ClientTarget | undefined;
   if (value.target !== undefined) {
@@ -408,39 +451,6 @@ function parseAgentMessage(raw: string): AgentMessage {
   throw new ApiError(400, "invalid_request", "Unsupported agent message type");
 }
 
-function parseAgentTokenPolicies(): Map<string, AllowedPersonaScope> {
-  const policies = new Map<string, AllowedPersonaScope>();
-  if (AGENT_TOKEN_PERSONAS_JSON.trim()) {
-    try {
-      const parsed = JSON.parse(AGENT_TOKEN_PERSONAS_JSON);
-      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
-        for (const [token, allowed] of Object.entries(parsed)) {
-          if (!token.trim()) {
-            continue;
-          }
-          if (allowed === "*") {
-            policies.set(token, "*");
-            continue;
-          }
-          if (Array.isArray(allowed)) {
-            const personaIds = allowed.map((item) => normalizeString(item)).filter((item): item is string => Boolean(item));
-            if (personaIds.length) {
-              policies.set(token, new Set(personaIds));
-            }
-          }
-        }
-      }
-    } catch (error) {
-      console.warn("Ignoring invalid AGENT_TOKEN_PERSONAS_JSON", error);
-    }
-  }
-
-  if (AGENT_SHARED_SECRET && !policies.has(AGENT_SHARED_SECRET)) {
-    policies.set(AGENT_SHARED_SECRET, "*");
-  }
-  return policies;
-}
-
 function extractAgentToken(req: Request): string | null {
   const auth = req.headers.get("authorization");
   if (auth?.startsWith("Bearer ")) {
@@ -449,24 +459,50 @@ function extractAgentToken(req: Request): string | null {
   return null;
 }
 
-function authorizeAgent(req: Request): { token: string; allowedPersonaIds: AllowedPersonaScope } {
+function authorizeAgent(req: Request): { token: string; policy: AgentTokenPolicy } {
   const token = extractAgentToken(req);
   if (!token) {
     throw new ApiError(401, "unauthorized_worker", "Missing worker token");
   }
-  const allowedPersonaIds = agentTokenPolicies.get(token);
-  if (!allowedPersonaIds) {
+  const policy = agentTokenPolicies.get(token);
+  if (!policy) {
     throw new ApiError(401, "unauthorized_worker", "Worker token is not authorized");
   }
-  return { token, allowedPersonaIds };
+  return { token, policy };
 }
 
-function isPersonaAllowed(scope: AllowedPersonaScope, personaId: string): boolean {
-  return scope === "*" || scope.has(personaId);
+function assertAgentIdAllowed(scope: AllowedScope, agentId: string): void {
+  if (!isScopeAllowed(scope, agentId)) {
+    throw new ApiError(
+      403,
+      "forbidden_agent_registration",
+      "Worker token is not allowed to register this agentId",
+    );
+  }
 }
 
-function arePersonasAllowed(scope: AllowedPersonaScope, personaIds: string[]): boolean {
-  return personaIds.every((personaId) => isPersonaAllowed(scope, personaId));
+function assertPersonasAllowed(scope: AllowedScope, personaIds: string[]): void {
+  if (!areAllAllowed(scope, personaIds)) {
+    throw new ApiError(
+      403,
+      "forbidden_persona_registration",
+      "Worker tried to register forbidden persona",
+    );
+  }
+}
+
+function assertTokenBoundToAgent(token: string, agentId: string): void {
+  try {
+    bindTokenToAgent(workerTokenBindings, token, agentId);
+  } catch (error) {
+    throw new ApiError(
+      403,
+      "forbidden_agent_registration",
+      error instanceof Error
+        ? error.message
+        : "Worker token is already bound to a different agentId",
+    );
+  }
 }
 
 function parseWorkerPollRegistration(value: JsonObject): WorkerPollRegistration {
@@ -579,6 +615,29 @@ async function buildFreshWorkerCountsByPersona(): Promise<Map<string, number>> {
     }
   }
   return counts;
+}
+
+function observedRestartGeneration(registration: WorkerPollRegistration): number {
+  return normalizeInteger(registration.capabilities.observedRestartGeneration) ?? 0;
+}
+
+function buildWorkerControlMessage(config: AgentConfigRecord): WorkerControlMessage {
+  return {
+    type: "control",
+    action: "restart",
+    agentId: config.agentId,
+    restartGeneration: config.restartGeneration,
+    config: {
+      runtime: config.runtime,
+      model: config.model,
+      apiBaseUrl: config.apiBaseUrl,
+      apiKey: config.apiKey,
+      systemPrompt: config.systemPrompt,
+      temperature: config.temperature,
+      store: config.store,
+      enabledSkills: config.enabledSkills,
+    },
+  };
 }
 
 async function pickFreshAgentInstance(
@@ -696,7 +755,10 @@ function detachClientSocket(socket: WebSocket): void {
   }
 }
 
-async function getConversationOwned(userId: string, conversationId: string): Promise<ConversationRecord> {
+async function getConversationOwned(
+  userId: string,
+  conversationId: string,
+): Promise<ConversationRecord> {
   const conversation = await store.getConversationOwned(userId, conversationId);
   if (!conversation) {
     throw new ApiError(404, "conversation_not_found", "Conversation not found");
@@ -768,7 +830,11 @@ async function completeRunAndNotify(
 
 function assertWorkerOwnsRun(connection: AgentConnection, run: StoredRun): void {
   if (!connection.worker) {
-    throw new ApiError(400, "worker_not_registered", "Worker must register before sending run updates");
+    throw new ApiError(
+      400,
+      "worker_not_registered",
+      "Worker must register before sending run updates",
+    );
   }
   assertRunOwnedByInstance(connection.worker.instanceId, run);
 }
@@ -891,7 +957,9 @@ async function savePolledWorkerPresence(registration: WorkerPollRegistration): P
 }
 
 async function touchPolledWorkerInstance(instanceId: string): Promise<void> {
-  const existing = (await store.listAgentInstances()).find((item) => item.instanceId === instanceId);
+  const existing = (await store.listAgentInstances()).find((item) =>
+    item.instanceId === instanceId
+  );
   if (!existing) {
     return;
   }
@@ -911,9 +979,9 @@ async function registerAgentConnection(
   if (!message.agentId || !message.instanceId) {
     throw new ApiError(400, "invalid_request", "agent_register requires agentId and instanceId");
   }
-  if (!arePersonasAllowed(connection.allowedPersonaIds, message.personaIds)) {
-    throw new ApiError(403, "forbidden_persona_registration", "Worker tried to register forbidden persona");
-  }
+  assertPersonasAllowed(connection.allowedPersonaIds, message.personaIds);
+  assertAgentIdAllowed(connection.allowedAgentIds, message.agentId);
+  assertTokenBoundToAgent(connection.token, message.agentId);
 
   if (connection.worker?.instanceId && connection.worker.instanceId !== message.instanceId) {
     unregisterWorker(workerRegistry, connection.worker.instanceId);
@@ -984,7 +1052,9 @@ async function unregisterAgentConnection(socket: WebSocket, reason: string): Pro
     });
   }
 
-  const affectedRuns = [...pendingRuns.values()].filter((pending) => pending.agentSocket === socket);
+  const affectedRuns = [...pendingRuns.values()].filter((pending) =>
+    pending.agentSocket === socket
+  );
   for (const pending of affectedRuns) {
     await failRunAndNotify(pending.runId, "Agent disconnected");
   }
@@ -997,7 +1067,8 @@ async function handleAgentSocket(req: Request): Promise<Response> {
     connectionId: crypto.randomUUID(),
     socket,
     token: auth.token,
-    allowedPersonaIds: auth.allowedPersonaIds,
+    allowedPersonaIds: auth.policy.allowedPersonaIds,
+    allowedAgentIds: auth.policy.allowedAgentIds,
     connectedAt: nowIso(),
     lastHeartbeatAt: nowIso(),
     worker: null,
@@ -1029,7 +1100,11 @@ async function handleAgentSocket(req: Request): Promise<Response> {
         }
 
         if (!connection.worker) {
-          throw new ApiError(400, "worker_not_registered", "Worker must register before sending updates");
+          throw new ApiError(
+            400,
+            "worker_not_registered",
+            "Worker must register before sending updates",
+          );
         }
 
         await markAgentHeartbeat(connection);
@@ -1044,9 +1119,11 @@ async function handleAgentSocket(req: Request): Promise<Response> {
         }
         await failRunAndNotify(message.runId, message.error, "failed", run);
       } catch (error) {
-        const apiError = error instanceof ApiError
-          ? error
-          : new ApiError(400, "invalid_request", error instanceof Error ? error.message : "Unhandled agent error");
+        const apiError = error instanceof ApiError ? error : new ApiError(
+          400,
+          "invalid_request",
+          error instanceof Error ? error.message : "Unhandled agent error",
+        );
         try {
           sendJson(socket, { type: "error", error: apiError.code, message: apiError.message });
         } catch {
@@ -1083,7 +1160,11 @@ async function handleClientWsPrompt(
     : await store.createConversation(
       userId,
       payload.target?.personaId ?? (() => {
-        throw new ApiError(400, "persona_id_required", "target.personaId is required when conversationId is absent");
+        throw new ApiError(
+          400,
+          "persona_id_required",
+          "target.personaId is required when conversationId is absent",
+        );
       })(),
       payload.title,
     );
@@ -1111,7 +1192,10 @@ async function handleClientWsPrompt(
 function handleClientSocket(req: Request): Response {
   const userId = getOptionalWsUserId(req);
   if (!userId) {
-    return json({ error: "missing_user_id", message: `Provide ${USER_HEADER} header or ?userId=` }, 401);
+    return json(
+      { error: "missing_user_id", message: `Provide ${USER_HEADER} header or ?userId=` },
+      401,
+    );
   }
 
   const { socket, response } = Deno.upgradeWebSocket(req);
@@ -1125,9 +1209,11 @@ function handleClientSocket(req: Request): Response {
         const payload = parseClientPrompt(event.data);
         await handleClientWsPrompt(socket, userId, payload);
       } catch (error) {
-        const apiError = error instanceof ApiError
-          ? error
-          : new ApiError(400, "invalid_request", error instanceof Error ? error.message : "Unhandled client error");
+        const apiError = error instanceof ApiError ? error : new ApiError(
+          400,
+          "invalid_request",
+          error instanceof Error ? error.message : "Unhandled client error",
+        );
         sendWsError(socket, apiError.message);
       }
     })();
@@ -1140,11 +1226,15 @@ function handleClientSocket(req: Request): Response {
 async function handleWorkerClaim(req: Request): Promise<Response> {
   const auth = authorizeAgent(req);
   const registration = parseWorkerPollRegistration(await readJsonObject(req));
-  if (!arePersonasAllowed(auth.allowedPersonaIds, registration.personaIds)) {
-    throw new ApiError(403, "forbidden_persona_registration", "Worker tried to register forbidden persona");
-  }
+  assertPersonasAllowed(auth.policy.allowedPersonaIds, registration.personaIds);
+  assertAgentIdAllowed(auth.policy.allowedAgentIds, registration.agentId);
+  assertTokenBoundToAgent(auth.token, registration.agentId);
 
   await savePolledWorkerPresence(registration);
+  const desiredConfig = await store.getAgentConfig(registration.agentId);
+  if (desiredConfig && desiredConfig.restartGeneration > observedRestartGeneration(registration)) {
+    return json(buildWorkerControlMessage(desiredConfig));
+  }
   const claimed = await store.claimQueuedRun({
     instanceId: registration.instanceId,
     agentId: registration.agentId,
@@ -1328,11 +1418,12 @@ Deno.serve({ hostname: HOST, port: PORT }, async (req) => {
         agentConnections: agentConnectionsBySocket.size,
         registeredAgents: freshAgentInstances.length,
         pendingRuns: pendingRuns.size,
-        personasOnline: [...onlineCounts.entries()].filter(([, count]) => count > 0).map(([personaId]) =>
-          personaId
-        ),
+        personasOnline: [...onlineCounts.entries()].filter(([, count]) => count > 0).map((
+          [personaId],
+        ) => personaId),
         adminConfigured: Boolean(
-          Deno.env.get("ADMIN_PASSWORD_HASH")?.trim() && Deno.env.get("ADMIN_SESSION_SECRET")?.trim(),
+          Deno.env.get("ADMIN_PASSWORD_HASH")?.trim() &&
+            Deno.env.get("ADMIN_SESSION_SECRET")?.trim(),
         ),
         knowledgeConfigured: Boolean(AGENT_TOOL_SHARED_SECRET),
       });

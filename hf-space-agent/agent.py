@@ -14,6 +14,7 @@ import websockets
 from openai import AsyncOpenAI, OpenAIError
 
 from codex_runner import CodexRunner, CodexRunnerConfig, CodexRunnerError
+from skills_bootstrap import SkillsBootstrapError, sync_skills
 
 
 logger = logging.getLogger("hf_space_agent")
@@ -23,12 +24,27 @@ class AgentError(RuntimeError):
     pass
 
 
+def _payload_string(
+    payload: dict[str, Any],
+    key: str,
+    fallback: str,
+    *,
+    allow_empty: bool = False,
+    strip: bool = True,
+) -> str:
+    if key not in payload:
+        return fallback
+    value = payload.get(key)
+    if not isinstance(value, str):
+        return fallback
+    normalized = value.strip() if strip else value
+    if normalized or allow_empty:
+        return normalized
+    return fallback
+
+
 @dataclass
-class AgentClient:
-    agent_id: str
-    instance_id: str
-    persona_ids: list[str]
-    version: str
+class AgentRuntimeConfig:
     provider: str
     runtime: str
     model: str
@@ -40,21 +56,10 @@ class AgentClient:
     temperature: float
     store: bool
     system_prompt: str
-    _sdk_client: AsyncOpenAI | None = field(default=None, init=False, repr=False)
-    _codex_runner: CodexRunner | None = field(default=None, init=False, repr=False)
-    _session_response_ids: dict[str, str] = field(default_factory=dict, init=False, repr=False)
-    _session_cache_limit: int = field(default=500, init=False, repr=False)
-    _responses_supports_previous_response_id: bool = field(default=True, init=False, repr=False)
+    enabled_skills: list[str] = field(default_factory=list)
 
     @classmethod
-    def from_env(cls) -> "AgentClient":
-        agent_id = os.getenv("AGENT_ID", "hf-space-agent").strip() or "hf-space-agent"
-        instance_id = os.getenv("AGENT_INSTANCE_ID", "").strip() or str(uuid.uuid4())
-        persona_ids_raw = os.getenv("AGENT_PERSONA_IDS", os.getenv("AGENT_PERSONA_ID", "default"))
-        persona_ids = [item.strip() for item in persona_ids_raw.split(",") if item.strip()]
-        if not persona_ids:
-            persona_ids = ["default"]
-        version = os.getenv("AGENT_VERSION", "2026-04-18").strip() or "2026-04-18"
+    def from_env(cls) -> "AgentRuntimeConfig":
         provider = os.getenv("AGENT_PROVIDER", "openai_compatible").strip() or "openai_compatible"
         runtime = os.getenv("AGENT_RUNTIME", "codex_cli").strip().lower() or "codex_cli"
         if runtime not in {"responses", "codex_cli"}:
@@ -75,47 +80,180 @@ class AgentClient:
             else:
                 api_base_url = legacy_api_url
 
-        api_key = os.getenv("AGENT_API_KEY", "").strip()
-        timeout_seconds = float(os.getenv("AGENT_TIMEOUT_SECONDS", "120"))
-        placeholder_enabled = os.getenv("AGENT_PLACEHOLDER_ENABLED", "false").lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
-        temperature = float(os.getenv("AGENT_TEMPERATURE", "0.2"))
-        store = os.getenv("AGENT_STORE", "true").lower() in {"1", "true", "yes", "on"}
-        system_prompt = os.getenv(
-            "AGENT_SYSTEM_PROMPT",
-            "You are Codex, a concise coding agent. Return practical implementation help.",
-        ).strip()
+        enabled_skills = [
+            item.strip()
+            for item in os.getenv("AGENT_ENABLED_SKILLS", "").split(",")
+            if item.strip()
+        ]
+        return cls(
+            provider=provider,
+            runtime=runtime,
+            model=model,
+            api_base_url=api_base_url,
+            api_key=os.getenv("AGENT_API_KEY", "").strip(),
+            api_kind=api_kind,
+            timeout_seconds=float(os.getenv("AGENT_TIMEOUT_SECONDS", "120")),
+            placeholder_enabled=os.getenv("AGENT_PLACEHOLDER_ENABLED", "false").lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            },
+            temperature=float(os.getenv("AGENT_TEMPERATURE", "0.2")),
+            store=os.getenv("AGENT_STORE", "true").lower() in {"1", "true", "yes", "on"},
+            system_prompt=os.getenv(
+                "AGENT_SYSTEM_PROMPT",
+                "You are Codex, a concise coding agent. Return practical implementation help.",
+            ).strip(),
+            enabled_skills=enabled_skills,
+        )
+
+    @classmethod
+    def from_payload(
+        cls,
+        payload: dict[str, Any],
+        fallback: "AgentRuntimeConfig",
+    ) -> "AgentRuntimeConfig":
+        enabled_skills = payload.get("enabledSkills")
+        if not isinstance(enabled_skills, list):
+            enabled_skills = fallback.enabled_skills
+        else:
+            enabled_skills = [item.strip() for item in enabled_skills if isinstance(item, str) and item.strip()]
+
+        runtime = str(payload.get("runtime") or fallback.runtime).strip().lower() or fallback.runtime
+        if runtime not in {"responses", "codex_cli"}:
+            runtime = fallback.runtime
+        return cls(
+            provider=_payload_string(payload, "provider", fallback.provider),
+            runtime=runtime,
+            model=_payload_string(payload, "model", fallback.model),
+            api_base_url=_payload_string(
+                payload,
+                "apiBaseUrl",
+                fallback.api_base_url,
+                allow_empty=True,
+            ).rstrip("/"),
+            api_key=_payload_string(payload, "apiKey", fallback.api_key, allow_empty=True, strip=False).strip(),
+            api_kind=_payload_string(payload, "apiKind", fallback.api_kind),
+            timeout_seconds=float(payload.get("timeoutSeconds") or fallback.timeout_seconds),
+            placeholder_enabled=bool(payload.get("placeholderEnabled", fallback.placeholder_enabled)),
+            temperature=float(payload.get("temperature") if payload.get("temperature") is not None else fallback.temperature),
+            store=bool(payload.get("store", fallback.store)),
+            system_prompt=_payload_string(
+                payload,
+                "systemPrompt",
+                fallback.system_prompt,
+                allow_empty=True,
+                strip=False,
+            ),
+            enabled_skills=enabled_skills,
+        )
+
+
+@dataclass
+class AgentClient:
+    agent_id: str
+    instance_id: str
+    persona_ids: list[str]
+    version: str
+    provider: str
+    runtime: str
+    model: str
+    api_base_url: str
+    api_key: str
+    api_kind: str
+    timeout_seconds: float
+    placeholder_enabled: bool
+    temperature: float
+    store: bool
+    system_prompt: str
+    enabled_skills: list[str] = field(default_factory=list)
+    available_skills: list[str] = field(default_factory=list)
+    observed_restart_generation: int = 0
+    _sdk_client: AsyncOpenAI | None = field(default=None, init=False, repr=False)
+    _codex_runner: CodexRunner | None = field(default=None, init=False, repr=False)
+    _session_response_ids: dict[str, str] = field(default_factory=dict, init=False, repr=False)
+    _session_cache_limit: int = field(default=500, init=False, repr=False)
+    _responses_supports_previous_response_id: bool = field(default=True, init=False, repr=False)
+
+    @classmethod
+    def from_env(cls) -> "AgentClient":
+        agent_id = os.getenv("AGENT_ID", "hf-space-agent").strip() or "hf-space-agent"
+        instance_id = os.getenv("AGENT_INSTANCE_ID", "").strip() or str(uuid.uuid4())
+        persona_ids_raw = os.getenv("AGENT_PERSONA_IDS", os.getenv("AGENT_PERSONA_ID", "default"))
+        persona_ids = [item.strip() for item in persona_ids_raw.split(",") if item.strip()]
+        if not persona_ids:
+            persona_ids = ["default"]
+        version = os.getenv("AGENT_VERSION", "2026-04-18").strip() or "2026-04-18"
+        runtime_config = AgentRuntimeConfig.from_env()
         client = cls(
             agent_id=agent_id,
             instance_id=instance_id,
             persona_ids=persona_ids,
             version=version,
-            provider=provider,
-            runtime=runtime,
-            model=model,
-            api_base_url=api_base_url,
-            api_key=api_key,
-            api_kind=api_kind,
-            timeout_seconds=timeout_seconds,
-            placeholder_enabled=placeholder_enabled,
-            temperature=temperature,
-            store=store,
-            system_prompt=system_prompt,
+            provider=runtime_config.provider,
+            runtime=runtime_config.runtime,
+            model=runtime_config.model,
+            api_base_url=runtime_config.api_base_url,
+            api_key=runtime_config.api_key,
+            api_kind=runtime_config.api_kind,
+            timeout_seconds=runtime_config.timeout_seconds,
+            placeholder_enabled=runtime_config.placeholder_enabled,
+            temperature=runtime_config.temperature,
+            store=runtime_config.store,
+            system_prompt=runtime_config.system_prompt,
+            enabled_skills=runtime_config.enabled_skills,
         )
-        if runtime == "codex_cli":
-            client._codex_runner = CodexRunner(
-                CodexRunnerConfig.from_env(
-                    default_model=model,
-                    default_api_base_url=api_base_url,
-                    default_api_key=api_key,
-                    default_timeout_seconds=timeout_seconds,
+        client._rebuild_runtime_clients()
+        return client
+
+    def runtime_config(self) -> AgentRuntimeConfig:
+        return AgentRuntimeConfig(
+            provider=self.provider,
+            runtime=self.runtime,
+            model=self.model,
+            api_base_url=self.api_base_url,
+            api_key=self.api_key,
+            api_kind=self.api_kind,
+            timeout_seconds=self.timeout_seconds,
+            placeholder_enabled=self.placeholder_enabled,
+            temperature=self.temperature,
+            store=self.store,
+            system_prompt=self.system_prompt,
+            enabled_skills=list(self.enabled_skills),
+        )
+
+    def apply_runtime_config(self, config: AgentRuntimeConfig, restart_generation: int | None = None) -> None:
+        self.provider = config.provider
+        self.runtime = config.runtime
+        self.model = config.model
+        self.api_base_url = config.api_base_url
+        self.api_key = config.api_key
+        self.api_kind = config.api_kind
+        self.timeout_seconds = config.timeout_seconds
+        self.placeholder_enabled = config.placeholder_enabled
+        self.temperature = config.temperature
+        self.store = config.store
+        self.system_prompt = config.system_prompt
+        self.enabled_skills = list(config.enabled_skills)
+        if restart_generation is not None:
+            self.observed_restart_generation = restart_generation
+        self._session_response_ids.clear()
+        self._responses_supports_previous_response_id = True
+        self._rebuild_runtime_clients()
+
+    def _rebuild_runtime_clients(self) -> None:
+        self._sdk_client = None
+        self._codex_runner = None
+        if self.runtime == "codex_cli":
+            self._codex_runner = CodexRunner(
+                CodexRunnerConfig.from_runtime(
+                    model=self.model,
+                    api_base_url=self.api_base_url,
+                    api_key=self.api_key,
+                    timeout_seconds=self.timeout_seconds,
                 )
             )
-        return client
 
     def build_registration_message(self) -> dict[str, Any]:
         return {
@@ -123,7 +261,17 @@ class AgentClient:
             "agentId": self.agent_id,
             "instanceId": self.instance_id,
             "personaIds": self.persona_ids,
-            "capabilities": {"stream": False, "tools": False},
+            "capabilities": {
+                "stream": False,
+                "tools": False,
+                "runtime": self.runtime,
+                "model": self.model,
+                "apiBaseUrl": self.api_base_url,
+                "apiKeyConfigured": bool(self.api_key),
+                "availableSkills": list(self.available_skills),
+                "enabledSkills": list(self.enabled_skills),
+                "observedRestartGeneration": self.observed_restart_generation,
+            },
             "version": self.version,
         }
 
@@ -375,6 +523,7 @@ class RelayBridge:
     last_error: str | None = None
     last_poll_at: str | None = None
     last_claimed_run_id: str | None = None
+    last_control_at: str | None = None
 
     @classmethod
     def from_env(cls, agent_client: AgentClient) -> "RelayBridge":
@@ -395,6 +544,8 @@ class RelayBridge:
             "last_error": self.last_error,
             "last_poll_at": self.last_poll_at,
             "last_claimed_run_id": self.last_claimed_run_id,
+            "last_control_at": self.last_control_at,
+            "observed_restart_generation": self.agent_client.observed_restart_generation,
         }
 
     async def run_forever(self) -> None:
@@ -485,12 +636,45 @@ class RelayBridge:
             self._worker_registration_payload(),
         )
         self.last_poll_at = datetime.now(timezone.utc).isoformat()
-        if not isinstance(claim, dict) or claim.get("type") != "prompt":
+        if not isinstance(claim, dict):
+            return False
+        if claim.get("type") == "control":
+            await self._apply_control(claim)
+            return True
+        if claim.get("type") != "prompt":
             return False
         run_id = claim.get("runId")
         self.last_claimed_run_id = run_id if isinstance(run_id, str) else None
         await self._process_claimed_prompt(claim)
         return True
+
+    async def _apply_control(self, payload: dict[str, Any]) -> None:
+        if payload.get("action") != "restart":
+            return
+        config_payload = payload.get("config")
+        if not isinstance(config_payload, dict):
+            raise AgentError("relay control payload is missing config")
+        restart_generation = payload.get("restartGeneration")
+        if not isinstance(restart_generation, int):
+            raise AgentError("relay control payload is missing restartGeneration")
+
+        runtime_config = AgentRuntimeConfig.from_payload(
+            config_payload,
+            fallback=self.agent_client.runtime_config(),
+        )
+        try:
+            skills_report = await asyncio.to_thread(
+                sync_skills,
+                None,
+                runtime_config.enabled_skills,
+            )
+        except SkillsBootstrapError as exc:
+            raise AgentError(f"skills sync failed during control apply: {exc}") from exc
+
+        self.agent_client.available_skills = list(skills_report.get("available_skills", []))
+        runtime_config.enabled_skills = list(skills_report.get("enabled_skills", runtime_config.enabled_skills))
+        self.agent_client.apply_runtime_config(runtime_config, restart_generation=restart_generation)
+        self.last_control_at = datetime.now(timezone.utc).isoformat()
 
     async def _process_claimed_prompt(self, payload: dict[str, Any]) -> None:
         run_id = payload.get("runId")
