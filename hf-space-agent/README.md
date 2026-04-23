@@ -13,17 +13,18 @@ license: mit
 
 Docker-ready Hugging Face Space app:
 - `GET /` returns a simple intro HTML page.
-- on startup, the agent opens an outbound WebSocket connection to the Deno relay.
-- on startup, optional skills sync pulls a public repo into `~/.codex/skills`.
+- on startup, the agent starts polling the Deno relay over HTTP via `POST /v1/worker/claim`.
+- on startup, optional skills sync pulls the configured repo into `~/.agent/skills` and keeps
+  `${CODEX_HOME}/skills` compatible.
 - there is no public agent API route for outsiders to call directly.
 
 ## Relay protocol
 
-After websocket connect, the worker first registers persona identity:
+Current default transport is worker polling. On each poll, the worker sends registration context to
+the relay:
 
 ```json
 {
-  "type": "agent_register",
   "agentId": "hf-space-coder-v1",
   "instanceId": "uuid",
   "personaIds": ["coder"],
@@ -35,7 +36,33 @@ After websocket connect, the worker first registers persona identity:
 }
 ```
 
-The Deno relay sends:
+Request:
+
+```http
+POST /v1/worker/claim
+Authorization: Bearer <workerSecret>
+Content-Type: application/json
+```
+
+The relay can reply with `204 No Content`, a `control` payload, or a `prompt` payload.
+
+Control example:
+
+```json
+{
+  "type": "control",
+  "action": "restart",
+  "agentId": "hf-space-coder-v1",
+  "restartGeneration": 2,
+  "config": {
+    "runtime": "responses",
+    "model": "gpt-5.3-codex",
+    "enabledSkills": ["persona-knowledge"]
+  }
+}
+```
+
+Prompt example:
 
 ```json
 {
@@ -52,12 +79,18 @@ The Deno relay sends:
 }
 ```
 
-The agent replies on the same WebSocket:
+After the worker finishes a run, it reports back with normal HTTP calls:
+
+```http
+POST /v1/worker/runs/{runId}/response
+POST /v1/worker/runs/{runId}/error
+```
+
+Success payload example:
 
 ```json
 {
-  "type": "response",
-  "runId": "uuid",
+  "instanceId": "uuid",
   "conversationId": "uuid",
   "personaId": "coder",
   "responseId": "resp_456",
@@ -68,6 +101,10 @@ The agent replies on the same WebSocket:
   "raw": {}
 }
 ```
+
+`GET /agent` WebSocket support still exists on the relay side, but the current HF worker loop
+defaults to polling. The variable name `DENO_AGENT_WS_URL` is legacy baggage; the runtime strips a
+trailing `/agent` when building the HTTP base URL.
 
 ## Environment variables
 
@@ -100,9 +137,10 @@ The agent replies on the same WebSocket:
 - `OPENCODE_WORKDIR` (default: `/tmp`)
 - `OPENCODE_PROVIDER_ID` (default: `relaychat`, used when `AGENT_MODEL` has no provider prefix)
 - `OPENCODE_PROVIDER_NAME` (default: `Relay Chat`)
-- `DENO_AGENT_WS_URL` (for example: `wss://your-deno-app.example/agent`)
+- `DENO_AGENT_WS_URL` (legacy variable name; accepts values like `wss://your-deno-app.example/agent`
+  or the relay base URL, and the worker derives the HTTP base URL for `/v1/worker/claim`)
 - `DENO_AGENT_SHARED_SECRET` (must match the Deno relay)
-- `DENO_RECONNECT_SECONDS` (default: `5`)
+- `DENO_RECONNECT_SECONDS` (default: `5`; idle/error backoff between polling attempts)
 - `RELAY_HINT` (text shown on `/`)
 - `SKILLS_REPO_URL` (public repo to sync skills from)
 - `SKILLS_REPO_REF` (default: `main`)
@@ -122,7 +160,7 @@ If `AGENT_API_KEY` is missing and placeholder mode is enabled, the API still res
 - `AGENT_RUNTIME=responses`: uses official OpenAI Python SDK async client.
 - `AGENT_RUNTIME=opencode_cli`: invokes installed `opencode` CLI and talks to OpenAI-compatible endpoints through `chat_completions`.
 
-All runtime modes preserve relay protocol.
+All runtime modes preserve the same claim/response relay protocol.
 `codex_cli` returns the real Codex thread id as `responseId`, so later turns can resume correctly.
 `responses` now retries once without `previous_response_id` when an OpenAI-compatible provider rejects that parameter, but that compatibility fallback does not preserve multi-turn continuity by itself.
 `opencode_cli` returns the OpenCode session id as `responseId`, so the relay can continue the same session after a control-plane restart.
@@ -136,6 +174,16 @@ If `SKILLS_SYNC_ON_STARTUP=true` and `SKILLS_REPO_URL` is configured:
 - reports sync status in `/healthz` under `skills_sync`
 
 An empty enabled-skills list now means "disable all skills" instead of "load everything".
+
+One subtle detail: `/healthz.skills_sync` reflects the latest startup sync result. The worker can
+later receive a control-plane restart with a new `enabledSkills` selection; the authoritative live
+state for that is the worker registration stored by `deno-relay`, not the startup snapshot alone.
+
+For the current repository layout, the correct repo configuration is:
+
+- `SKILLS_REPO_URL=https://github.com/neyou6657/persona-deck-platform`
+- `SKILLS_REPO_REF=main`
+- `SKILLS_REPO_SUBDIR=skills`
 
 ## Run locally
 
@@ -158,7 +206,7 @@ docker run --rm -p 7860:7860 -e AGENT_API_KEY=your_key hf-space-agent
 3. Configure secrets and variables:
    - secret: `AGENT_API_KEY`
    - secret: `DENO_AGENT_SHARED_SECRET`
-   - variable: `DENO_AGENT_WS_URL`
+   - variable: `DENO_AGENT_WS_URL` (legacy name; usually set to `wss://<relay>/agent`)
    - variable: `AGENT_MODEL`
    - variable: `AGENT_API_BASE_URL`
    - variable: `AGENT_API_KIND`
