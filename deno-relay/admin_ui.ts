@@ -403,9 +403,9 @@ export function renderAdminPage(): Response {
               <label>
                 Enabled Skills
                 <select id="agentSkillsInput" multiple size="8"></select>
-                <span class="hint">按住 Ctrl / Cmd 可多选。留空表示不给 agent 强制下发 skills 列表。</span>
+                <span class="hint">按住 Ctrl / Cmd 可多选。不选表示禁用全部，重启后只会安装你勾上的那些。</span>
               </label>
-              <div id="agentAvailableSkills" class="hint">当前还没有上报可用 skills。</div>
+              <div id="agentAvailableSkills" class="hint">正在读取 skills 仓库列表。</div>
               <div id="agentInstancesHint" class="hint">当前还没有观测到这个 agent 的实例。</div>
               <div class="row">
                 <button id="saveAgentButton" type="button">保存 Agent 配置</button>
@@ -494,6 +494,14 @@ export function renderAdminPage(): Response {
         agentConfigs: [],
         agentInstances: [],
         knownSkills: [],
+        skillsCatalog: {
+          status: "unknown",
+          skills: [],
+          repoUrl: "",
+          repoRef: "",
+          repoSubdir: "",
+          error: "",
+        },
       };
 
       const statusEl = document.getElementById("status");
@@ -621,6 +629,64 @@ export function renderAdminPage(): Response {
           }
         }
         state.knownSkills.sort((left, right) => left.localeCompare(right));
+      }
+
+      function resetKnownSkills(skills = []) {
+        state.knownSkills = [];
+        collectKnownSkills(skills);
+      }
+
+      function normalizeSkillsCatalog(value) {
+        const source = value && typeof value === "object" ? value : {};
+        return {
+          status: typeof source.status === "string" ? source.status : "unknown",
+          skills: Array.isArray(source.skills)
+            ? source.skills.filter((item) => typeof item === "string").map((item) => item.trim()).filter(Boolean)
+            : [],
+          repoUrl: typeof source.repoUrl === "string" ? source.repoUrl : "",
+          repoRef: typeof source.repoRef === "string" ? source.repoRef : "",
+          repoSubdir: typeof source.repoSubdir === "string" ? source.repoSubdir : "",
+          error: typeof source.error === "string" ? source.error : "",
+        };
+      }
+
+      function summarizeSkillsCatalog(catalog, fallbackSkills = []) {
+        const normalized = normalizeSkillsCatalog(catalog);
+        if (normalized.status === "ok") {
+          if (!normalized.skills.length) {
+            return "Skills 仓库读到了，但里面暂时没有带 SKILL.md 的目录。";
+          }
+          const source = normalized.repoUrl || "skills 仓库";
+          const ref = normalized.repoRef ? (" @" + normalized.repoRef) : "";
+          const subdir = normalized.repoSubdir ? (" / " + normalized.repoSubdir) : "";
+          return "Skills 仓库已读取：" + normalized.skills.length + " 个，来源 " + source + ref + subdir + "。";
+        }
+        if (fallbackSkills.length) {
+          return "Skills 仓库暂时不可用，先用 worker 最近见过的 skills 顶着。";
+        }
+        if (normalized.status === "failed") {
+          return "Skills 仓库读取失败：" + (normalized.error || "未知错误");
+        }
+        if (normalized.status === "skipped") {
+          return "还没配 skills 仓库；当前只显示已保存的技能名。";
+        }
+        return "正在读取 skills 仓库列表。";
+      }
+
+      function summarizeAgentInstances(instances) {
+        const items = Array.isArray(instances) ? instances : [];
+        if (!items.length) {
+          return "当前还没有观测到这个 agent 的实例。";
+        }
+        const online = items.filter((item) => item.status === "online");
+        const offlineCount = items.length - online.length;
+        if (online.length) {
+          const onlineIds = online.map((item) => item.instanceId).join(", ");
+          return offlineCount
+            ? ("在线实例 " + online.length + " 个：" + onlineIds + "；离线历史 " + offlineCount + " 个已折叠。")
+            : ("在线实例 " + online.length + " 个：" + onlineIds);
+        }
+        return "当前没有在线实例。历史离线实例 " + offlineCount + " 个已折叠。";
       }
 
       function rebuildSkillsSelect(selectedSkills = []) {
@@ -799,8 +865,9 @@ export function renderAdminPage(): Response {
         agentTemperatureInputEl.value = "0.2";
         agentStoreInputEl.checked = true;
         agentSystemPromptInputEl.value = "";
+        resetKnownSkills(state.skillsCatalog.skills);
         rebuildSkillsSelect([]);
-        agentAvailableSkillsEl.textContent = "当前还没有上报可用 skills。";
+        agentAvailableSkillsEl.textContent = summarizeSkillsCatalog(state.skillsCatalog);
         agentInstancesHintEl.textContent = "当前还没有观测到这个 agent 的实例。";
       }
 
@@ -830,12 +897,16 @@ export function renderAdminPage(): Response {
         const payload = await api("/v1/admin/agents");
         state.agentConfigs = Array.isArray(payload.agentConfigs) ? payload.agentConfigs : [];
         state.agentInstances = Array.isArray(payload.agentInstances) ? payload.agentInstances : [];
+        state.skillsCatalog = normalizeSkillsCatalog(payload.skillsCatalog);
+        resetKnownSkills(state.skillsCatalog.skills);
         for (const config of state.agentConfigs) {
           collectKnownSkills(config?.enabledSkills);
         }
-        for (const instance of state.agentInstances) {
-          collectKnownSkills(instance?.capabilities?.availableSkills);
-          collectKnownSkills(instance?.capabilities?.enabledSkills);
+        if (!state.skillsCatalog.skills.length) {
+          for (const instance of state.agentInstances) {
+            collectKnownSkills(instance?.capabilities?.availableSkills);
+            collectKnownSkills(instance?.capabilities?.enabledSkills);
+          }
         }
         const rows = buildAgentRows();
         if (!preserveSelection || !rows.some((item) => item.agentId === state.selectedAgentId)) {
@@ -846,6 +917,7 @@ export function renderAdminPage(): Response {
           await loadAgentDetail(state.selectedAgentId);
         } else {
           resetAgentForm();
+          agentAvailableSkillsEl.textContent = summarizeSkillsCatalog(state.skillsCatalog);
         }
       }
 
@@ -868,6 +940,7 @@ export function renderAdminPage(): Response {
         const payload = await api("/v1/admin/agents/" + encodeURIComponent(agentId));
         const config = payload.config;
         const instances = Array.isArray(payload.instances) ? payload.instances : [];
+        state.skillsCatalog = normalizeSkillsCatalog(payload.skillsCatalog ?? state.skillsCatalog);
         state.selectedAgentId = config.agentId;
         agentIdInputEl.value = config.agentId || "";
         const runtime = normalizeRuntime(config.runtime || "codex_cli");
@@ -881,18 +954,17 @@ export function renderAdminPage(): Response {
         agentTemperatureInputEl.value = String(config.temperature ?? 0.2);
         agentStoreInputEl.checked = Boolean(config.store);
         agentSystemPromptInputEl.value = config.systemPrompt || "";
-        const availableSkills = Array.from(new Set(instances.flatMap((instance) => Array.isArray(instance.capabilities?.availableSkills)
+        const observedSkills = Array.from(new Set(instances.flatMap((instance) => Array.isArray(instance.capabilities?.availableSkills)
           ? instance.capabilities.availableSkills
           : [])));
-        collectKnownSkills(availableSkills);
+        resetKnownSkills(state.skillsCatalog.skills);
         collectKnownSkills(config.enabledSkills);
+        if (!state.skillsCatalog.skills.length) {
+          collectKnownSkills(observedSkills);
+        }
         rebuildSkillsSelect(Array.isArray(config.enabledSkills) ? config.enabledSkills : []);
-        agentAvailableSkillsEl.textContent = availableSkills.length
-          ? ("可用 skills: " + availableSkills.join(", "))
-          : "当前 worker 还没上报可用 skills。";
-        agentInstancesHintEl.textContent = instances.length
-          ? instances.map((item) => item.instanceId + " / " + item.status).join(" ; ")
-          : "当前还没有观测到这个 agent 的实例。";
+        agentAvailableSkillsEl.textContent = summarizeSkillsCatalog(state.skillsCatalog, observedSkills);
+        agentInstancesHintEl.textContent = summarizeAgentInstances(instances);
         renderAgentList();
       }
 

@@ -31,6 +31,8 @@ Deno.test("renderAdminPage returns login-first admin console html", async () => 
   assertStringIncludes(body, '<select id="agentApiKindInput"');
   assertStringIncludes(body, '<select id="agentSkillsInput"');
   assertStringIncludes(body, "按住 Ctrl / Cmd 可多选");
+  assertStringIncludes(body, "不选表示禁用全部");
+  assertEquals(body.includes("当前还没有上报可用 skills"), false);
   assertEquals(body.includes("每行一个 skill slug"), false);
   assertStringIncludes(body, "Worker Secret");
   assertStringIncludes(body, "HF Space Repo");

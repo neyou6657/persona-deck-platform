@@ -15,6 +15,7 @@ class ContainerBootstrapTest(unittest.TestCase):
         content = DOCKERFILE.read_text(encoding="utf-8")
 
         self.assertIn("CODEX_HOME=/root/.codex", content)
+        self.assertIn("/root/.agent/skills", content)
         self.assertNotIn("USER appuser", content)
         self.assertIn('ENTRYPOINT ["./docker-entrypoint.sh"]', content)
 

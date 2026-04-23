@@ -154,7 +154,17 @@ Deno.test("admin agent config endpoints can save and restart an agent", async ()
       },
     }),
     new URL("https://example.test/v1/admin/agents"),
-    { store, config },
+    {
+      store,
+      config,
+      listSkillsCatalog: async () => ({
+        status: "ok",
+        skills: ["skill-a", "skill-b", "skill-c"],
+        repoUrl: "https://github.com/example/skills",
+        repoRef: "main",
+        repoSubdir: "skills",
+      }),
+    },
   );
   const listPayload = await readJson(list!);
   assertEquals(listPayload.agentConfigs.length, 1);
@@ -162,6 +172,60 @@ Deno.test("admin agent config endpoints can save and restart an agent", async ()
   assertEquals(listPayload.agentConfigs[0].workerSecret, "wrk-secret-1");
   assertEquals(listPayload.agentConfigs[0].spaceRepoId, "rain34572/responses-adapter-gateway");
   assertEquals(listPayload.agentConfigs[0].enabledSkills, ["skill-a", "skill-b"]);
+  assertEquals(listPayload.skillsCatalog.skills, ["skill-a", "skill-b", "skill-c"]);
+
+  await store.close();
+});
+
+Deno.test("admin agent detail returns repo-backed skills catalog", async () => {
+  const store = createMemoryControlPlaneStore();
+  const config = {
+    enabled: true,
+    passwordHash:
+      "pbkdf2_sha256:210000:relay-salt:1701a688e9dbb3048375e5dbc12df9a8114d22d50637512dd9c4e5ab498bf4c3",
+    sessionSecret: "secret-pepper",
+    sessionTtlHours: 24,
+  };
+
+  const login = await handleAdminRequest(
+    new Request("https://example.test/v1/admin/login", {
+      method: "POST",
+      body: JSON.stringify({ password: "secret" }),
+    }),
+    new URL("https://example.test/v1/admin/login"),
+    { store, config },
+  );
+  const auth = await readJson(login!);
+
+  await store.upsertAgentConfig({
+    agentId: "hf-space-coder-v1",
+    enabledSkills: ["skill-b"],
+  });
+
+  const response = await handleAdminRequest(
+    new Request("https://example.test/v1/admin/agents/hf-space-coder-v1", {
+      headers: {
+        authorization: `Bearer ${auth.token}`,
+      },
+    }),
+    new URL("https://example.test/v1/admin/agents/hf-space-coder-v1"),
+    {
+      store,
+      config,
+      listSkillsCatalog: async () => ({
+        status: "ok",
+        skills: ["skill-a", "skill-b"],
+        repoUrl: "https://github.com/example/skills",
+        repoRef: "main",
+        repoSubdir: "skills",
+      }),
+    },
+  );
+  const payload = await readJson(response!);
+
+  assertEquals(payload.config.agentId, "hf-space-coder-v1");
+  assertEquals(payload.config.enabledSkills, ["skill-b"]);
+  assertEquals(payload.skillsCatalog.skills, ["skill-a", "skill-b"]);
 
   await store.close();
 });

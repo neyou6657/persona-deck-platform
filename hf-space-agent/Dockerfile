@@ -19,7 +19,7 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY . /app
 RUN chmod +x /app/docker-entrypoint.sh \
-    && mkdir -p /root/.codex/skills
+    && mkdir -p /root/.codex/skills /root/.agent/skills
 
 EXPOSE 7860
 

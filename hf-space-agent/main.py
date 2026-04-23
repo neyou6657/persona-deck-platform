@@ -30,13 +30,8 @@ async def startup_event() -> None:
         requested_skills = resolve_startup_enabled_skills(agent_client.enabled_skills)
         app.state.skills_sync = sync_skills(enabled_skills=requested_skills)
         agent_client.available_skills = list(app.state.skills_sync.get("available_skills", []))
-        fallback_enabled_skills = (
-            agent_client.enabled_skills
-            if requested_skills is not None
-            else list(app.state.skills_sync.get("available_skills", []))
-        )
         agent_client.enabled_skills = list(
-            app.state.skills_sync.get("enabled_skills", fallback_enabled_skills)
+            app.state.skills_sync.get("enabled_skills", requested_skills)
         )
     except SkillsBootstrapError as exc:
         app.state.skills_sync = {"status": "failed", "error": str(exc)}

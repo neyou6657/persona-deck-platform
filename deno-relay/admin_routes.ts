@@ -8,11 +8,13 @@ import {
   verifyAdminPassword,
 } from "./admin_auth.ts";
 import type { AgentConfigRecord, ControlPlaneStore, JsonObject } from "./postgres.ts";
+import { listSkillsCatalog, type SkillsCatalog } from "./skills_catalog.ts";
 
 type AdminRouteOptions = {
   store: ControlPlaneStore;
   config?: AdminAuthConfig;
   restartAgentConfig?: (agentId: string) => Promise<AgentConfigRecord>;
+  listSkillsCatalog?: () => Promise<SkillsCatalog>;
 };
 
 class AdminRouteError extends Error {
@@ -132,6 +134,13 @@ function routeError(error: unknown): Response {
   return json({ error: "internal_error", message: "Internal server error" }, 500);
 }
 
+async function resolveSkillsCatalog(options: AdminRouteOptions): Promise<SkillsCatalog> {
+  if (options.listSkillsCatalog) {
+    return await options.listSkillsCatalog();
+  }
+  return await listSkillsCatalog();
+}
+
 export async function handleAdminRequest(
   req: Request,
   url: URL,
@@ -186,9 +195,11 @@ export async function handleAdminRequest(
 
     if (url.pathname === "/v1/admin/agents" && req.method === "GET") {
       const agentInstances = normalizeAgentInstances(await options.store.listAgentInstances());
+      const skillsCatalog = await resolveSkillsCatalog(options);
       return json({
         agentConfigs: await options.store.listAgentConfigs(),
         agentInstances,
+        skillsCatalog,
       });
     }
 
@@ -221,6 +232,7 @@ export async function handleAdminRequest(
       if (req.method === "GET") {
         const agentInstances = normalizeAgentInstances(await options.store.listAgentInstances())
           .filter((item) => item.agentId === agentId);
+        const skillsCatalog = await resolveSkillsCatalog(options);
         const storedConfig = await options.store.getAgentConfig(agentId);
         if (!storedConfig && !agentInstances.length) {
           throw new AdminRouteError(404, "agent_config_not_found", "Agent config not found");
@@ -249,6 +261,7 @@ export async function handleAdminRequest(
         return json({
           config: configRecord,
           instances: agentInstances,
+          skillsCatalog,
         });
       }
 

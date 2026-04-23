@@ -109,6 +109,7 @@ The agent replies on the same WebSocket:
 - `SKILLS_REPO_SUBDIR` (default: `skills`)
 - `SKILLS_SYNC_ON_STARTUP` (default: `true`)
 - `SKILLS_CACHE_DIR` (default: `/tmp/hf-space-skills-cache`)
+- `AGENT_SKILLS_DIR` (default: `~/.agent/skills`; active skills directory populated from the repo)
 - `CODEX_HOME` (default: `/home/appuser/.codex`)
 - `DENO_KNOWLEDGE_BASE_URL` (reserved for persona-knowledge skill usage)
 - `DENO_KNOWLEDGE_SHARED_SECRET` (reserved for persona-knowledge skill usage)
@@ -130,8 +131,11 @@ All runtime modes preserve relay protocol.
 
 If `SKILLS_SYNC_ON_STARTUP=true` and `SKILLS_REPO_URL` is configured:
 - startup executes a git sync into cache directory
-- copies `SKILLS_REPO_SUBDIR` into `${CODEX_HOME}/skills`
+- materializes the selected skills into `${AGENT_SKILLS_DIR}`
+- maintains a compatibility link or copy at `${CODEX_HOME}/skills`
 - reports sync status in `/healthz` under `skills_sync`
+
+An empty enabled-skills list now means "disable all skills" instead of "load everything".
 
 ## Run locally
 

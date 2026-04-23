@@ -26,11 +26,16 @@ class SkillsBootstrapConfig:
     repo_ref: str
     repo_subdir: str
     codex_home: Path
+    agent_skills_dir: Path
     cache_dir: Path
 
     @classmethod
     def from_env(cls) -> "SkillsBootstrapConfig":
-        codex_home = Path(os.getenv("CODEX_HOME", "/home/appuser/.codex")).expanduser()
+        home_dir = Path.home()
+        codex_home = Path(os.getenv("CODEX_HOME", str(home_dir / ".codex"))).expanduser()
+        agent_skills_dir = Path(
+            os.getenv("AGENT_SKILLS_DIR", str(home_dir / ".agent" / "skills"))
+        ).expanduser()
         cache_root = Path(
             os.getenv("SKILLS_CACHE_DIR", tempfile.gettempdir() + "/hf-space-skills-cache")
         ).expanduser()
@@ -40,6 +45,7 @@ class SkillsBootstrapConfig:
             repo_ref=os.getenv("SKILLS_REPO_REF", "main").strip() or "main",
             repo_subdir=os.getenv("SKILLS_REPO_SUBDIR", "skills").strip().strip("/") or "skills",
             codex_home=codex_home,
+            agent_skills_dir=agent_skills_dir,
             cache_dir=cache_root,
         )
 
@@ -77,9 +83,17 @@ def _list_skill_names(root: Path) -> list[str]:
     )
 
 
+def _remove_path(path: Path) -> None:
+    if not path.exists() and not path.is_symlink():
+        return
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+        return
+    shutil.rmtree(path)
+
+
 def _materialize_enabled_skills(source_dir: Path, target_dir: Path, enabled_skills: list[str] | None) -> list[str]:
-    if target_dir.exists():
-        shutil.rmtree(target_dir)
+    _remove_path(target_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
 
     available = _list_skill_names(source_dir)
@@ -93,18 +107,42 @@ def _materialize_enabled_skills(source_dir: Path, target_dir: Path, enabled_skil
     return enabled
 
 
+def _ensure_codex_skills_compat(target_dir: Path, compat_dir: Path) -> str:
+    if compat_dir.resolve() == target_dir.resolve():
+        compat_dir.mkdir(parents=True, exist_ok=True)
+        return "direct"
+
+    if compat_dir.is_symlink():
+        try:
+            if compat_dir.resolve() == target_dir.resolve():
+                return "symlink"
+        except OSError:
+            pass
+
+    _remove_path(compat_dir)
+    compat_dir.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        compat_dir.symlink_to(target_dir, target_is_directory=True)
+        return "symlink"
+    except OSError:
+        shutil.copytree(target_dir, compat_dir, dirs_exist_ok=True)
+        return "copy"
+
+
 def sync_skills(
     config: SkillsBootstrapConfig | None = None,
     enabled_skills: list[str] | None = None,
 ) -> dict[str, Any]:
     cfg = config or SkillsBootstrapConfig.from_env()
-    target_dir = cfg.codex_home / "skills"
+    target_dir = cfg.agent_skills_dir
+    compat_dir = cfg.codex_home / "skills"
     report: dict[str, Any] = {
         "enabled": cfg.enabled,
         "repo_url": cfg.repo_url,
         "repo_ref": cfg.repo_ref,
         "repo_subdir": cfg.repo_subdir,
         "target_dir": str(target_dir),
+        "compat_target_dir": str(compat_dir),
     }
 
     if not cfg.enabled:
@@ -119,6 +157,7 @@ def sync_skills(
 
     cfg.cache_dir.parent.mkdir(parents=True, exist_ok=True)
     cfg.codex_home.mkdir(parents=True, exist_ok=True)
+    cfg.agent_skills_dir.parent.mkdir(parents=True, exist_ok=True)
 
     if (cfg.cache_dir / ".git").exists():
         _run_git(["fetch", "--depth", "1", "origin", cfg.repo_ref], cwd=cfg.cache_dir)
@@ -136,6 +175,7 @@ def sync_skills(
 
     available_skills = _list_skill_names(source_dir)
     active_skills = _materialize_enabled_skills(source_dir, target_dir, enabled_skills)
+    report["compat_mode"] = _ensure_codex_skills_compat(target_dir, compat_dir)
 
     report["status"] = "ok"
     report["skills_count"] = _count_skills(target_dir)
