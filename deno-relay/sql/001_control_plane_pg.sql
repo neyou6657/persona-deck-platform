@@ -100,6 +100,7 @@ create index if not exists agent_instances_status_idx
 create table if not exists agent_configs (
   agent_id text primary key,
   runtime text not null default 'codex_cli',
+  api_kind text not null default 'responses',
   model text not null default 'gpt-5.3-codex',
   api_base_url text not null default '',
   api_key text not null default '',
@@ -110,6 +111,9 @@ create table if not exists agent_configs (
   restart_generation integer not null default 0,
   updated_at timestamptz not null default now()
 );
+
+alter table if exists agent_configs
+  add column if not exists api_kind text not null default 'responses';
 
 create table if not exists admin_sessions (
   session_id_hash text primary key,

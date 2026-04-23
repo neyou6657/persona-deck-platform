@@ -74,6 +74,10 @@ function normalizeNumber(value: unknown): number | null {
   return null;
 }
 
+function defaultApiKindForRuntime(runtime: string): string {
+  return runtime.trim().toLowerCase() === "opencode_cli" ? "chat_completions" : "responses";
+}
+
 async function readJsonObject(req: Request): Promise<Record<string, unknown>> {
   let value: unknown;
   try {
@@ -196,6 +200,7 @@ export async function handleAdminRequest(
       const configRecord = await options.store.upsertAgentConfig({
         agentId,
         runtime: normalizeString(body.runtime) ?? undefined,
+        apiKind: normalizeString(body.apiKind) ?? undefined,
         model: normalizeString(body.model) ?? undefined,
         apiBaseUrl: typeof body.apiBaseUrl === "string" ? body.apiBaseUrl : undefined,
         apiKey: typeof body.apiKey === "string" ? body.apiKey : undefined,
@@ -217,9 +222,12 @@ export async function handleAdminRequest(
         if (!storedConfig && !agentInstances.length) {
           throw new AdminRouteError(404, "agent_config_not_found", "Agent config not found");
         }
+        const runtime = normalizeString(agentInstances[0]?.capabilities?.runtime) ?? "codex_cli";
         const configRecord = storedConfig ?? {
           agentId,
-          runtime: normalizeString(agentInstances[0]?.capabilities?.runtime) ?? "codex_cli",
+          runtime,
+          apiKind: normalizeString(agentInstances[0]?.capabilities?.apiKind) ??
+            defaultApiKindForRuntime(runtime),
           model: normalizeString(agentInstances[0]?.capabilities?.model) ?? "",
           apiBaseUrl: normalizeString(agentInstances[0]?.capabilities?.apiBaseUrl) ?? "",
           apiKey: "",
@@ -248,6 +256,7 @@ export async function handleAdminRequest(
         await options.store.upsertAgentConfig({
           agentId,
           runtime: normalizeString(body.runtime) ?? current.runtime,
+          apiKind: normalizeString(body.apiKind) ?? current.apiKind,
           model: normalizeString(body.model) ?? current.model,
           apiBaseUrl: typeof body.apiBaseUrl === "string" ? body.apiBaseUrl : current.apiBaseUrl,
           apiKey: typeof body.apiKey === "string" ? body.apiKey : current.apiKey,

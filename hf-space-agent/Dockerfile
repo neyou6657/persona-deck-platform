@@ -8,8 +8,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git nodejs npm \
+    && apt-get install -y --no-install-recommends curl git nodejs npm \
     && npm install -g @openai/codex \
+    && curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path \
+    && ln -sf /root/.opencode/bin/opencode /usr/local/bin/opencode \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt /app/requirements.txt

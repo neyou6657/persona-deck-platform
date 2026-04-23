@@ -629,6 +629,7 @@ function buildWorkerControlMessage(config: AgentConfigRecord): WorkerControlMess
     restartGeneration: config.restartGeneration,
     config: {
       runtime: config.runtime,
+      apiKind: config.apiKind,
       model: config.model,
       apiBaseUrl: config.apiBaseUrl,
       apiKey: config.apiKey,

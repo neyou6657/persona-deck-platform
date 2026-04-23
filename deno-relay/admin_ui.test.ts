@@ -26,6 +26,8 @@ Deno.test("renderAdminPage returns login-first admin console html", async () => 
   assertStringIncludes(body, "/v1/admin/personas");
   assertStringIncludes(body, "/v1/admin/agents");
   assertStringIncludes(body, "Agent 控制");
+  assertStringIncludes(body, "API 格式");
+  assertStringIncludes(body, "responses 或 chat_completions");
   assertStringIncludes(body, "知识库");
 });
 

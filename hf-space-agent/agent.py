@@ -14,10 +14,13 @@ import websockets
 from openai import AsyncOpenAI, OpenAIError
 
 from codex_runner import CodexRunner, CodexRunnerConfig, CodexRunnerError
+from opencode_runner import OpenCodeRunner, OpenCodeRunnerConfig, OpenCodeRunnerError
 from skills_bootstrap import SkillsBootstrapError, sync_skills
 
 
 logger = logging.getLogger("hf_space_agent")
+
+SUPPORTED_RUNTIMES = {"responses", "codex_cli", "opencode_cli"}
 
 
 class AgentError(RuntimeError):
@@ -43,6 +46,36 @@ def _payload_string(
     return fallback
 
 
+def _normalize_runtime(runtime: str, fallback: str) -> str:
+    normalized = runtime.strip().lower() or fallback
+    if normalized in SUPPORTED_RUNTIMES:
+        return normalized
+    logger.warning("AGENT_RUNTIME=%s is not supported; forcing %r", runtime, fallback)
+    return fallback
+
+
+def _default_api_kind_for_runtime(runtime: str) -> str:
+    return "chat_completions" if runtime == "opencode_cli" else "responses"
+
+
+def _normalize_api_kind(runtime: str, requested_kind: str) -> str:
+    normalized = requested_kind.strip().lower() or _default_api_kind_for_runtime(runtime)
+    if runtime == "opencode_cli":
+        if normalized != "chat_completions":
+            logger.warning(
+                "AGENT_API_KIND=%s is not supported with AGENT_RUNTIME=opencode_cli; forcing 'chat_completions'",
+                requested_kind,
+            )
+        return "chat_completions"
+    if normalized != "responses":
+        logger.warning(
+            "AGENT_API_KIND=%s is not supported with AGENT_RUNTIME=%s; forcing 'responses'",
+            requested_kind,
+            runtime,
+        )
+    return "responses"
+
+
 @dataclass
 class AgentRuntimeConfig:
     provider: str
@@ -61,15 +94,10 @@ class AgentRuntimeConfig:
     @classmethod
     def from_env(cls) -> "AgentRuntimeConfig":
         provider = os.getenv("AGENT_PROVIDER", "openai_compatible").strip() or "openai_compatible"
-        runtime = os.getenv("AGENT_RUNTIME", "codex_cli").strip().lower() or "codex_cli"
-        if runtime not in {"responses", "codex_cli"}:
-            logger.warning("AGENT_RUNTIME=%s is not supported; forcing 'codex_cli'", runtime)
-            runtime = "codex_cli"
+        runtime = _normalize_runtime(os.getenv("AGENT_RUNTIME", "codex_cli"), "codex_cli")
         model = os.getenv("AGENT_MODEL", "gpt-5.3-codex").strip() or "gpt-5.3-codex"
-        requested_kind = os.getenv("AGENT_API_KIND", "responses").strip() or "responses"
-        if requested_kind != "responses":
-            logger.warning("AGENT_API_KIND=%s is not supported; forcing 'responses'", requested_kind)
-        api_kind = "responses"
+        requested_kind = os.getenv("AGENT_API_KIND", _default_api_kind_for_runtime(runtime))
+        api_kind = _normalize_api_kind(runtime, requested_kind)
         api_base_url = os.getenv("AGENT_API_BASE_URL", "https://api.openai.com/v1").strip().rstrip("/")
         legacy_api_url = os.getenv("AGENT_API_URL", "").strip().rstrip("/")
         if legacy_api_url:
@@ -120,9 +148,12 @@ class AgentRuntimeConfig:
         else:
             enabled_skills = [item.strip() for item in enabled_skills if isinstance(item, str) and item.strip()]
 
-        runtime = str(payload.get("runtime") or fallback.runtime).strip().lower() or fallback.runtime
-        if runtime not in {"responses", "codex_cli"}:
-            runtime = fallback.runtime
+        runtime = _normalize_runtime(str(payload.get("runtime") or fallback.runtime), fallback.runtime)
+        requested_kind = _payload_string(
+            payload,
+            "apiKind",
+            _default_api_kind_for_runtime(runtime),
+        )
         return cls(
             provider=_payload_string(payload, "provider", fallback.provider),
             runtime=runtime,
@@ -134,7 +165,7 @@ class AgentRuntimeConfig:
                 allow_empty=True,
             ).rstrip("/"),
             api_key=_payload_string(payload, "apiKey", fallback.api_key, allow_empty=True, strip=False).strip(),
-            api_kind=_payload_string(payload, "apiKind", fallback.api_kind),
+            api_kind=_normalize_api_kind(runtime, requested_kind),
             timeout_seconds=float(payload.get("timeoutSeconds") or fallback.timeout_seconds),
             placeholder_enabled=bool(payload.get("placeholderEnabled", fallback.placeholder_enabled)),
             temperature=float(payload.get("temperature") if payload.get("temperature") is not None else fallback.temperature),
@@ -172,6 +203,7 @@ class AgentClient:
     observed_restart_generation: int = 0
     _sdk_client: AsyncOpenAI | None = field(default=None, init=False, repr=False)
     _codex_runner: CodexRunner | None = field(default=None, init=False, repr=False)
+    _opencode_runner: OpenCodeRunner | None = field(default=None, init=False, repr=False)
     _session_response_ids: dict[str, str] = field(default_factory=dict, init=False, repr=False)
     _session_cache_limit: int = field(default=500, init=False, repr=False)
     _responses_supports_previous_response_id: bool = field(default=True, init=False, repr=False)
@@ -245,9 +277,19 @@ class AgentClient:
     def _rebuild_runtime_clients(self) -> None:
         self._sdk_client = None
         self._codex_runner = None
+        self._opencode_runner = None
         if self.runtime == "codex_cli":
             self._codex_runner = CodexRunner(
                 CodexRunnerConfig.from_runtime(
+                    model=self.model,
+                    api_base_url=self.api_base_url,
+                    api_key=self.api_key,
+                    timeout_seconds=self.timeout_seconds,
+                )
+            )
+        if self.runtime == "opencode_cli":
+            self._opencode_runner = OpenCodeRunner(
+                OpenCodeRunnerConfig.from_runtime(
                     model=self.model,
                     api_base_url=self.api_base_url,
                     api_key=self.api_key,
@@ -267,6 +309,7 @@ class AgentClient:
                 "runtime": self.runtime,
                 "model": self.model,
                 "apiBaseUrl": self.api_base_url,
+                "apiKind": self.api_kind,
                 "apiKeyConfigured": bool(self.api_key),
                 "availableSkills": list(self.available_skills),
                 "enabledSkills": list(self.enabled_skills),
@@ -284,6 +327,8 @@ class AgentClient:
     ) -> dict[str, Any]:
         if self.runtime == "codex_cli":
             return await self._call_codex_cli(prompt, session_id, metadata, previous_response_id)
+        if self.runtime == "opencode_cli":
+            return await self._call_opencode_cli(prompt, session_id, metadata, previous_response_id)
         if self.api_key:
             return await self._call_responses(prompt, session_id, metadata, previous_response_id)
         if self.placeholder_enabled:
@@ -316,6 +361,39 @@ class AgentClient:
             )
         except CodexRunnerError as exc:
             raise AgentError(f"codex cli request failed: {exc}") from exc
+
+        response_id = result.get("response_id")
+        if session_id and isinstance(response_id, str) and response_id.strip():
+            self._session_response_ids[session_id] = response_id.strip()
+            self._trim_session_cache()
+        return result
+
+    async def _call_opencode_cli(
+        self,
+        prompt: str,
+        session_id: str | None,
+        metadata: dict[str, Any],
+        previous_response_id: str | None,
+    ) -> dict[str, Any]:
+        continuity_response_id: str | None = None
+        if isinstance(previous_response_id, str) and previous_response_id.strip():
+            continuity_response_id = previous_response_id.strip()
+        elif session_id:
+            continuity_response_id = self._session_response_ids.get(session_id)
+
+        if self._opencode_runner is None:
+            raise AgentError("AGENT_RUNTIME=opencode_cli but opencode runner is not initialized")
+
+        try:
+            result = await self._opencode_runner.run(
+                prompt=prompt,
+                system_prompt=self.system_prompt,
+                session_id=session_id,
+                previous_response_id=continuity_response_id,
+                metadata=metadata,
+            )
+        except OpenCodeRunnerError as exc:
+            raise AgentError(f"opencode cli request failed: {exc}") from exc
 
         response_id = result.get("response_id")
         if session_id and isinstance(response_id, str) and response_id.strip():

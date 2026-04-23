@@ -77,9 +77,9 @@ The agent replies on the same WebSocket:
 - `AGENT_PERSONA_ID` (legacy single-persona fallback if `AGENT_PERSONA_IDS` is not set)
 - `AGENT_VERSION` (default: `2026-04-18`)
 - `AGENT_PROVIDER` (default: `openai_compatible`)
-- `AGENT_RUNTIME` (`responses` or `codex_cli`, default: `codex_cli`)
+- `AGENT_RUNTIME` (`responses`, `codex_cli`, or `opencode_cli`, default: `codex_cli`)
 - `AGENT_MODEL` (default: `gpt-5.3-codex`)
-- `AGENT_API_KIND` (kept for compatibility, runtime is Responses-only and forces `responses`)
+- `AGENT_API_KIND` (`responses` for `responses/codex_cli`; `chat_completions` for `opencode_cli`)
 - `AGENT_API_BASE_URL` (default: `https://api.openai.com/v1`)
 - `AGENT_API_URL` (legacy compatibility override; if set, it is converted to `base_url`)
 - `AGENT_API_KEY` (default: empty)
@@ -95,6 +95,11 @@ The agent replies on the same WebSocket:
 - `CODEX_MODEL` (optional override for codex_cli runtime)
 - `CODEX_TIMEOUT_SECONDS` (default: `120`)
 - `CODEX_WORKDIR` (default: `/tmp`)
+- `OPENCODE_BIN` (default: `opencode`)
+- `OPENCODE_HOME` (default: `~/.opencode-relay`)
+- `OPENCODE_WORKDIR` (default: `/tmp`)
+- `OPENCODE_PROVIDER_ID` (default: `relaychat`, used when `AGENT_MODEL` has no provider prefix)
+- `OPENCODE_PROVIDER_NAME` (default: `Relay Chat`)
 - `DENO_AGENT_WS_URL` (for example: `wss://your-deno-app.example/agent`)
 - `DENO_AGENT_SHARED_SECRET` (must match the Deno relay)
 - `DENO_RECONNECT_SECONDS` (default: `5`)
@@ -114,10 +119,12 @@ If `AGENT_API_KEY` is missing and placeholder mode is enabled, the API still res
 
 - `AGENT_RUNTIME=codex_cli`: invokes installed `codex` CLI and continues conversations with real Codex thread ids via `codex exec resume`.
 - `AGENT_RUNTIME=responses`: uses official OpenAI Python SDK async client.
+- `AGENT_RUNTIME=opencode_cli`: invokes installed `opencode` CLI and talks to OpenAI-compatible endpoints through `chat_completions`.
 
-Both modes preserve relay protocol.
+All runtime modes preserve relay protocol.
 `codex_cli` returns the real Codex thread id as `responseId`, so later turns can resume correctly.
 `responses` now retries once without `previous_response_id` when an OpenAI-compatible provider rejects that parameter, but that compatibility fallback does not preserve multi-turn continuity by itself.
+`opencode_cli` returns the OpenCode session id as `responseId`, so the relay can continue the same session after a control-plane restart.
 
 ## Skills bootstrap
 

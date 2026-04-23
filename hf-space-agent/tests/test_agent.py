@@ -124,6 +124,23 @@ class _FakeCodexRunner:
         }
 
 
+class _FakeOpenCodeRunner:
+    def __init__(self, config):
+        self.config = config
+        self.calls = []
+
+    async def run(self, **kwargs):
+        self.calls.append(kwargs)
+        return {
+            "reply": "opencode cli reply",
+            "response_id": "opencode-ses-1",
+            "model": "openrouter/claude-sonnet",
+            "usage": None,
+            "raw": {"runtime": "opencode_cli"},
+            "session_id": kwargs.get("session_id"),
+        }
+
+
 class AgentClientTest(unittest.IsolatedAsyncioTestCase):
     async def test_build_registration_message_uses_persona_env(self):
         with patch.dict(
@@ -323,6 +340,42 @@ class AgentClientTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["reply"], "codex cli reply")
         self.assertEqual(result["response_id"], "codex-resp-1")
 
+    async def test_generate_uses_opencode_cli_runtime_when_configured(self):
+        fake_runners = []
+
+        def _fake_runner_factory(config):
+            runner = _FakeOpenCodeRunner(config)
+            fake_runners.append(runner)
+            return runner
+
+        with patch("agent.OpenCodeRunner", side_effect=_fake_runner_factory):
+            with patch.dict(
+                "os.environ",
+                {
+                    "AGENT_RUNTIME": "opencode_cli",
+                    "AGENT_API_KIND": "chat_completions",
+                    "AGENT_MODEL": "relaychat/test-model",
+                    "AGENT_API_KEY": "test-key",
+                    "AGENT_API_BASE_URL": "https://example.invalid/v1",
+                },
+                clear=False,
+            ):
+                client = AgentClient.from_env()
+                result = await client.generate(
+                    prompt="run opencode path",
+                    session_id="session-z",
+                    metadata={"channel": "relay"},
+                    previous_response_id="ses-prev",
+                )
+
+        self.assertEqual(client.runtime, "opencode_cli")
+        self.assertEqual(client.api_kind, "chat_completions")
+        self.assertEqual(len(fake_runners), 1)
+        self.assertEqual(len(fake_runners[0].calls), 1)
+        self.assertEqual(fake_runners[0].calls[0]["previous_response_id"], "ses-prev")
+        self.assertEqual(result["reply"], "opencode cli reply")
+        self.assertEqual(result["response_id"], "opencode-ses-1")
+
     async def test_runtime_defaults_to_codex_cli(self):
         with patch.dict("os.environ", {}, clear=True):
             client = AgentClient.from_env()
@@ -466,6 +519,7 @@ class AgentClientTest(unittest.IsolatedAsyncioTestCase):
                     "restartGeneration": 3,
                     "config": {
                         "runtime": "codex_cli",
+                        "apiKind": "responses",
                         "model": "gpt-5.4",
                         "apiBaseUrl": "https://new.example/v1",
                         "apiKey": "new-key",
@@ -488,6 +542,7 @@ class AgentClientTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(handled)
         self.assertEqual(client.model, "gpt-5.4")
+        self.assertEqual(client.api_kind, "responses")
         self.assertEqual(client.api_base_url, "https://new.example/v1")
         self.assertEqual(client.api_key, "new-key")
         self.assertEqual(client.system_prompt, "new prompt")
@@ -532,6 +587,7 @@ class AgentClientTest(unittest.IsolatedAsyncioTestCase):
                     "restartGeneration": 4,
                     "config": {
                         "runtime": "codex_cli",
+                        "apiKind": "responses",
                         "model": "gpt-5.4",
                         "apiBaseUrl": "",
                         "apiKey": "",

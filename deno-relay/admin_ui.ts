@@ -338,7 +338,13 @@ export function renderAdminPage(): Response {
                 </label>
                 <label>
                   Runtime
-                  <input id="agentRuntimeInput" type="text" placeholder="codex_cli 或 responses" />
+                  <input id="agentRuntimeInput" type="text" placeholder="codex_cli、responses 或 opencode_cli" />
+                </label>
+              </div>
+              <div class="two-up">
+                <label>
+                  API 格式
+                  <input id="agentApiKindInput" type="text" placeholder="responses 或 chat_completions" />
                 </label>
               </div>
               <div class="two-up">
@@ -478,6 +484,7 @@ export function renderAdminPage(): Response {
       const knowledgeHintEl = document.getElementById("knowledgeHint");
       const agentIdInputEl = document.getElementById("agentIdInput");
       const agentRuntimeInputEl = document.getElementById("agentRuntimeInput");
+      const agentApiKindInputEl = document.getElementById("agentApiKindInput");
       const agentModelInputEl = document.getElementById("agentModelInput");
       const agentEndpointInputEl = document.getElementById("agentEndpointInput");
       const agentApiKeyInputEl = document.getElementById("agentApiKeyInput");
@@ -545,6 +552,12 @@ export function renderAdminPage(): Response {
           return value;
         }
         return fallback;
+      }
+
+      function defaultApiKindForRuntime(runtime) {
+        return String(runtime || "").trim().toLowerCase() === "opencode_cli"
+          ? "chat_completions"
+          : "responses";
       }
 
       async function api(path, options = {}) {
@@ -666,6 +679,7 @@ export function renderAdminPage(): Response {
         state.selectedAgentId = "";
         agentIdInputEl.value = "";
         agentRuntimeInputEl.value = "codex_cli";
+        agentApiKindInputEl.value = "responses";
         agentModelInputEl.value = "";
         agentEndpointInputEl.value = "";
         agentApiKeyInputEl.value = "";
@@ -737,6 +751,7 @@ export function renderAdminPage(): Response {
         state.selectedAgentId = config.agentId;
         agentIdInputEl.value = config.agentId || "";
         agentRuntimeInputEl.value = config.runtime || "codex_cli";
+        agentApiKindInputEl.value = config.apiKind || defaultApiKindForRuntime(config.runtime);
         agentModelInputEl.value = config.model || "";
         agentEndpointInputEl.value = config.apiBaseUrl || "";
         agentApiKeyInputEl.value = config.apiKey || "";
@@ -814,6 +829,8 @@ export function renderAdminPage(): Response {
           const payload = {
             agentId,
             runtime: agentRuntimeInputEl.value.trim() || "codex_cli",
+            apiKind: agentApiKindInputEl.value.trim() ||
+              defaultApiKindForRuntime(agentRuntimeInputEl.value),
             model: agentModelInputEl.value.trim(),
             apiBaseUrl: agentEndpointInputEl.value.trim(),
             apiKey: agentApiKeyInputEl.value,
@@ -999,6 +1016,13 @@ export function renderAdminPage(): Response {
         resetAgentForm();
         renderAgentList();
         setStatus("新 Agent 草稿已就位。", "ok");
+      });
+      agentRuntimeInputEl.addEventListener("change", () => {
+        const nextApiKind = defaultApiKindForRuntime(agentRuntimeInputEl.value);
+        const currentApiKind = agentApiKindInputEl.value.trim();
+        if (!currentApiKind || currentApiKind === "responses" || currentApiKind === "chat_completions") {
+          agentApiKindInputEl.value = nextApiKind;
+        }
       });
       saveAgentButtonEl.addEventListener("click", async () => {
         await saveAgentConfig();

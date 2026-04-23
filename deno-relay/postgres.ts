@@ -77,6 +77,7 @@ export type AgentInstanceRecord = {
 export type AgentConfigRecord = {
   agentId: string;
   runtime: string;
+  apiKind: string;
   model: string;
   apiBaseUrl: string;
   apiKey: string;
@@ -140,6 +141,7 @@ export type QueueRunResult = {
 export type UpsertAgentConfigInput = {
   agentId: string;
   runtime?: string;
+  apiKind?: string;
   model?: string;
   apiBaseUrl?: string;
   apiKey?: string;
@@ -345,13 +347,30 @@ function normalizeAgentInstanceRecord(
   };
 }
 
+function defaultApiKindForRuntime(runtime: string): string {
+  return runtime.trim().toLowerCase() === "opencode_cli" ? "chat_completions" : "responses";
+}
+
+function normalizeAgentApiKind(runtime: string, apiKind: unknown): string {
+  const normalized = typeof apiKind === "string" && apiKind.trim() ? apiKind.trim() : "";
+  if (runtime.trim().toLowerCase() === "opencode_cli") {
+    return normalized === "chat_completions" ? normalized : "chat_completions";
+  }
+  return "responses";
+}
+
 function normalizeAgentConfigRecord(
-  row: Omit<AgentConfigRecord, "enabledSkills"> & {
+  row: Omit<AgentConfigRecord, "apiKind" | "enabledSkills"> & {
+    apiKind?: unknown;
     enabledSkills: unknown;
   },
 ): AgentConfigRecord {
   return {
     ...row,
+    apiKind: normalizeAgentApiKind(
+      row.runtime,
+      row.apiKind ?? defaultApiKindForRuntime(row.runtime),
+    ),
     enabledSkills: normalizeStringArrayValue(row.enabledSkills),
   };
 }
@@ -770,9 +789,14 @@ class MemoryControlPlaneStore implements ControlPlaneStore {
 
   async upsertAgentConfig(input: UpsertAgentConfigInput): Promise<AgentConfigRecord> {
     const current = this.agentConfigs.get(input.agentId);
+    const runtime = input.runtime?.trim() || current?.runtime || "codex_cli";
     const record: AgentConfigRecord = {
       agentId: input.agentId,
-      runtime: input.runtime?.trim() || current?.runtime || "codex_cli",
+      runtime,
+      apiKind: normalizeAgentApiKind(
+        runtime,
+        input.apiKind ?? current?.apiKind ?? defaultApiKindForRuntime(runtime),
+      ),
       model: input.model?.trim() || current?.model || "gpt-5.3-codex",
       apiBaseUrl: input.apiBaseUrl !== undefined
         ? input.apiBaseUrl.trim()
@@ -1871,6 +1895,10 @@ class PostgresControlPlaneStore implements ControlPlaneStore {
   async upsertAgentConfig(input: UpsertAgentConfigInput): Promise<AgentConfigRecord> {
     const current = await this.getAgentConfig(input.agentId);
     const runtime = input.runtime?.trim() || current?.runtime || "codex_cli";
+    const apiKind = normalizeAgentApiKind(
+      runtime,
+      input.apiKind ?? current?.apiKind ?? defaultApiKindForRuntime(runtime),
+    );
     const model = input.model?.trim() || current?.model || "gpt-5.3-codex";
     const apiBaseUrl = input.apiBaseUrl !== undefined
       ? input.apiBaseUrl.trim()
@@ -1888,6 +1916,7 @@ class PostgresControlPlaneStore implements ControlPlaneStore {
       insert into agent_configs (
         agent_id,
         runtime,
+        api_kind,
         model,
         api_base_url,
         api_key,
@@ -1900,6 +1929,7 @@ class PostgresControlPlaneStore implements ControlPlaneStore {
       ) values (
         ${input.agentId},
         ${runtime},
+        ${apiKind},
         ${model},
         ${apiBaseUrl},
         ${apiKey},
@@ -1912,6 +1942,7 @@ class PostgresControlPlaneStore implements ControlPlaneStore {
       )
       on conflict (agent_id) do update set
         runtime = excluded.runtime,
+        api_kind = excluded.api_kind,
         model = excluded.model,
         api_base_url = excluded.api_base_url,
         api_key = excluded.api_key,
@@ -1923,6 +1954,7 @@ class PostgresControlPlaneStore implements ControlPlaneStore {
       returning
         agent_id as "agentId",
         runtime,
+        api_kind as "apiKind",
         model,
         api_base_url as "apiBaseUrl",
         api_key as "apiKey",
@@ -1941,6 +1973,7 @@ class PostgresControlPlaneStore implements ControlPlaneStore {
       select
         agent_id as "agentId",
         runtime,
+        api_kind as "apiKind",
         model,
         api_base_url as "apiBaseUrl",
         api_key as "apiKey",
@@ -1962,6 +1995,7 @@ class PostgresControlPlaneStore implements ControlPlaneStore {
       select
         agent_id as "agentId",
         runtime,
+        api_kind as "apiKind",
         model,
         api_base_url as "apiBaseUrl",
         api_key as "apiKey",
@@ -1987,6 +2021,7 @@ class PostgresControlPlaneStore implements ControlPlaneStore {
       returning
         agent_id as "agentId",
         runtime,
+        api_kind as "apiKind",
         model,
         api_base_url as "apiBaseUrl",
         api_key as "apiKey",
