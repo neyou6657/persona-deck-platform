@@ -11,8 +11,8 @@ import {
   type AgentConfigRecord,
   type AgentInstanceRecord,
   type ConversationRecord,
-  ensureControlPlaneSchema,
   createPostgresControlPlaneStore,
+  ensureControlPlaneSchema,
   type JsonObject,
   type PersonaSeed,
   type RunStatus,
@@ -28,6 +28,7 @@ import {
   isScopeAllowed,
   parseAgentTokenPolicies,
 } from "./worker_auth.ts";
+import { prepareAgentConfigForRestart } from "./agent_restart.ts";
 
 type AgentRegisterMessage = {
   type: "agent_register";
@@ -188,7 +189,10 @@ const workerRegistry = createWorkerRegistryState();
 const agentConnectionsBySocket = new Map<WebSocket, AgentConnection>();
 const agentConnectionsByInstanceId = new Map<string, AgentConnection>();
 const pendingRuns = new Map<string, PendingRun>();
-const agentTokenPolicies = parseAgentTokenPolicies(AGENT_SHARED_SECRET, AGENT_TOKEN_PERSONAS_JSON);
+const staticAgentTokenPolicies = parseAgentTokenPolicies(
+  AGENT_SHARED_SECRET,
+  AGENT_TOKEN_PERSONAS_JSON,
+);
 const workerTokenBindings = new Map<string, string>();
 
 await store.seedPersonas(parsePersonaCatalog());
@@ -461,12 +465,31 @@ function extractAgentToken(req: Request): string | null {
   return null;
 }
 
-function authorizeAgent(req: Request): { token: string; policy: AgentTokenPolicy } {
+function buildDynamicWorkerPolicy(agentId: string): AgentTokenPolicy {
+  return {
+    allowedPersonaIds: "*",
+    allowedAgentIds: new Set([agentId]),
+  };
+}
+
+async function resolveAgentTokenPolicy(token: string): Promise<AgentTokenPolicy | null> {
+  const staticPolicy = staticAgentTokenPolicies.get(token);
+  if (staticPolicy) {
+    return staticPolicy;
+  }
+  const config = await store.findAgentConfigByWorkerSecret(token);
+  if (!config) {
+    return null;
+  }
+  return buildDynamicWorkerPolicy(config.agentId);
+}
+
+async function authorizeAgent(req: Request): Promise<{ token: string; policy: AgentTokenPolicy }> {
   const token = extractAgentToken(req);
   if (!token) {
     throw new ApiError(401, "unauthorized_worker", "Missing worker token");
   }
-  const policy = agentTokenPolicies.get(token);
+  const policy = await resolveAgentTokenPolicy(token);
   if (!policy) {
     throw new ApiError(401, "unauthorized_worker", "Worker token is not authorized");
   }
@@ -1064,7 +1087,7 @@ async function unregisterAgentConnection(socket: WebSocket, reason: string): Pro
 }
 
 async function handleAgentSocket(req: Request): Promise<Response> {
-  const auth = authorizeAgent(req);
+  const auth = await authorizeAgent(req);
   const { socket, response } = Deno.upgradeWebSocket(req);
   const connection: AgentConnection = {
     connectionId: crypto.randomUUID(),
@@ -1227,7 +1250,7 @@ function handleClientSocket(req: Request): Response {
 }
 
 async function handleWorkerClaim(req: Request): Promise<Response> {
-  const auth = authorizeAgent(req);
+  const auth = await authorizeAgent(req);
   const registration = parseWorkerPollRegistration(await readJsonObject(req));
   assertPersonasAllowed(auth.policy.allowedPersonaIds, registration.personaIds);
   assertAgentIdAllowed(auth.policy.allowedAgentIds, registration.agentId);
@@ -1263,7 +1286,7 @@ async function handleWorkerClaim(req: Request): Promise<Response> {
 }
 
 async function handleWorkerRunResponse(req: Request, runId: string): Promise<Response> {
-  authorizeAgent(req);
+  await authorizeAgent(req);
   const body = parseWorkerRunResponse(await readJsonObject(req));
   await touchPolledWorkerInstance(body.instanceId);
 
@@ -1287,7 +1310,7 @@ async function handleWorkerRunResponse(req: Request, runId: string): Promise<Res
 }
 
 async function handleWorkerRunError(req: Request, runId: string): Promise<Response> {
-  authorizeAgent(req);
+  await authorizeAgent(req);
   const body = parseWorkerRunError(await readJsonObject(req));
   await touchPolledWorkerInstance(body.instanceId);
 
@@ -1393,7 +1416,16 @@ Deno.serve({ hostname: HOST, port: PORT }, async (req) => {
 
   const url = new URL(req.url);
 
-  const adminResponse = await handleAdminRequest(req, url, { store });
+  const adminResponse = await handleAdminRequest(req, url, {
+    store,
+    restartAgentConfig: async (agentId) => {
+      const config = await store.getAgentConfig(agentId);
+      if (!config) {
+        throw new ApiError(404, "agent_config_not_found", "Agent config not found");
+      }
+      return await prepareAgentConfigForRestart(store, agentId);
+    },
+  });
   if (adminResponse) {
     return adminResponse;
   }

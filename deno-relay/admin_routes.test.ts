@@ -97,6 +97,8 @@ Deno.test("admin agent config endpoints can save and restart an agent", async ()
         agentId: "hf-space-coder-v1",
         runtime: "codex_cli",
         apiKind: "responses",
+        workerSecret: "wrk-secret-1",
+        spaceRepoId: "rain34572/responses-adapter-gateway",
         model: "gpt-5.4",
         apiBaseUrl: "https://relay.example/v1",
         apiKey: "sk-secret",
@@ -112,6 +114,8 @@ Deno.test("admin agent config endpoints can save and restart an agent", async ()
   const savedPayload = await readJson(saved!);
   assertEquals(savedPayload.agentId, "hf-space-coder-v1");
   assertEquals(savedPayload.apiKind, "responses");
+  assertEquals(savedPayload.workerSecret, "wrk-secret-1");
+  assertEquals(savedPayload.spaceRepoId, "rain34572/responses-adapter-gateway");
   assertEquals(savedPayload.restartGeneration, 0);
 
   const cleared = await handleAdminRequest(
@@ -155,6 +159,8 @@ Deno.test("admin agent config endpoints can save and restart an agent", async ()
   const listPayload = await readJson(list!);
   assertEquals(listPayload.agentConfigs.length, 1);
   assertEquals(listPayload.agentConfigs[0].apiKind, "responses");
+  assertEquals(listPayload.agentConfigs[0].workerSecret, "wrk-secret-1");
+  assertEquals(listPayload.agentConfigs[0].spaceRepoId, "rain34572/responses-adapter-gateway");
   assertEquals(listPayload.agentConfigs[0].enabledSkills, ["skill-a", "skill-b"]);
 
   await store.close();

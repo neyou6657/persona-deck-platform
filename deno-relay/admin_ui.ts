@@ -346,6 +346,10 @@ export function renderAdminPage(): Response {
                   API 格式
                   <input id="agentApiKindInput" type="text" placeholder="responses 或 chat_completions" />
                 </label>
+                <label>
+                  HF Space Repo
+                  <input id="agentSpaceRepoInput" type="text" placeholder="例如 rain34572/responses-adapter-gateway" />
+                </label>
               </div>
               <div class="two-up">
                 <label>
@@ -363,9 +367,19 @@ export function renderAdminPage(): Response {
                   <input id="agentApiKeyInput" type="password" placeholder="sk-..." />
                 </label>
                 <label>
+                  Worker Secret
+                  <input id="agentWorkerSecretInput" type="password" placeholder="点击生成，或者自己填一个" />
+                </label>
+              </div>
+              <div class="two-up">
+                <label>
                   Temperature
                   <input id="agentTemperatureInput" type="number" min="0" max="2" step="0.1" placeholder="0.2" />
                 </label>
+                <div class="stack">
+                  <span class="hint">这个 secret 不会自动回写；请手动同步到 HF Space 环境变量 \`DENO_AGENT_SHARED_SECRET\` 和 \`DENO_KNOWLEDGE_SHARED_SECRET\`。</span>
+                  <button id="generateWorkerSecretButton" class="ghost" type="button">生成 Worker Secret</button>
+                </div>
               </div>
               <label class="row">
                 <input id="agentStoreInput" type="checkbox" checked />
@@ -485,9 +499,11 @@ export function renderAdminPage(): Response {
       const agentIdInputEl = document.getElementById("agentIdInput");
       const agentRuntimeInputEl = document.getElementById("agentRuntimeInput");
       const agentApiKindInputEl = document.getElementById("agentApiKindInput");
+      const agentSpaceRepoInputEl = document.getElementById("agentSpaceRepoInput");
       const agentModelInputEl = document.getElementById("agentModelInput");
       const agentEndpointInputEl = document.getElementById("agentEndpointInput");
       const agentApiKeyInputEl = document.getElementById("agentApiKeyInput");
+      const agentWorkerSecretInputEl = document.getElementById("agentWorkerSecretInput");
       const agentTemperatureInputEl = document.getElementById("agentTemperatureInput");
       const agentStoreInputEl = document.getElementById("agentStoreInput");
       const agentSystemPromptInputEl = document.getElementById("agentSystemPromptInput");
@@ -497,6 +513,7 @@ export function renderAdminPage(): Response {
       const saveAgentButtonEl = document.getElementById("saveAgentButton");
       const restartAgentButtonEl = document.getElementById("restartAgentButton");
       const newAgentButtonEl = document.getElementById("newAgentButton");
+      const generateWorkerSecretButtonEl = document.getElementById("generateWorkerSecretButton");
       const personaIdInputEl = document.getElementById("personaIdInput");
       const displayNameInputEl = document.getElementById("displayNameInput");
       const descriptionInputEl = document.getElementById("descriptionInput");
@@ -558,6 +575,10 @@ export function renderAdminPage(): Response {
         return String(runtime || "").trim().toLowerCase() === "opencode_cli"
           ? "chat_completions"
           : "responses";
+      }
+
+      function generateWorkerSecret() {
+        return "wrk_" + crypto.randomUUID().replaceAll("-", "") + crypto.randomUUID().replaceAll("-", "");
       }
 
       async function api(path, options = {}) {
@@ -680,9 +701,11 @@ export function renderAdminPage(): Response {
         agentIdInputEl.value = "";
         agentRuntimeInputEl.value = "codex_cli";
         agentApiKindInputEl.value = "responses";
+        agentSpaceRepoInputEl.value = "";
         agentModelInputEl.value = "";
         agentEndpointInputEl.value = "";
         agentApiKeyInputEl.value = "";
+        agentWorkerSecretInputEl.value = "";
         agentTemperatureInputEl.value = "0.2";
         agentStoreInputEl.checked = true;
         agentSystemPromptInputEl.value = "";
@@ -752,9 +775,11 @@ export function renderAdminPage(): Response {
         agentIdInputEl.value = config.agentId || "";
         agentRuntimeInputEl.value = config.runtime || "codex_cli";
         agentApiKindInputEl.value = config.apiKind || defaultApiKindForRuntime(config.runtime);
+        agentSpaceRepoInputEl.value = config.spaceRepoId || "";
         agentModelInputEl.value = config.model || "";
         agentEndpointInputEl.value = config.apiBaseUrl || "";
         agentApiKeyInputEl.value = config.apiKey || "";
+        agentWorkerSecretInputEl.value = config.workerSecret || "";
         agentTemperatureInputEl.value = String(config.temperature ?? 0.2);
         agentStoreInputEl.checked = Boolean(config.store);
         agentSystemPromptInputEl.value = config.systemPrompt || "";
@@ -831,9 +856,11 @@ export function renderAdminPage(): Response {
             runtime: agentRuntimeInputEl.value.trim() || "codex_cli",
             apiKind: agentApiKindInputEl.value.trim() ||
               defaultApiKindForRuntime(agentRuntimeInputEl.value),
+            spaceRepoId: agentSpaceRepoInputEl.value.trim(),
             model: agentModelInputEl.value.trim(),
             apiBaseUrl: agentEndpointInputEl.value.trim(),
             apiKey: agentApiKeyInputEl.value,
+            workerSecret: agentWorkerSecretInputEl.value.trim(),
             temperature: Number(agentTemperatureInputEl.value || "0.2"),
             store: agentStoreInputEl.checked,
             systemPrompt: agentSystemPromptInputEl.value,
@@ -1016,6 +1043,10 @@ export function renderAdminPage(): Response {
         resetAgentForm();
         renderAgentList();
         setStatus("新 Agent 草稿已就位。", "ok");
+      });
+      generateWorkerSecretButtonEl.addEventListener("click", () => {
+        agentWorkerSecretInputEl.value = generateWorkerSecret();
+        setStatus("新 Worker Secret 已生成。记得手动同步到 HF Space 环境变量。", "ok");
       });
       agentRuntimeInputEl.addEventListener("change", () => {
         const nextApiKind = defaultApiKindForRuntime(agentRuntimeInputEl.value);

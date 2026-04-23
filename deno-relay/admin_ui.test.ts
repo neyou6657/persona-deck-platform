@@ -28,6 +28,10 @@ Deno.test("renderAdminPage returns login-first admin console html", async () => 
   assertStringIncludes(body, "Agent 控制");
   assertStringIncludes(body, "API 格式");
   assertStringIncludes(body, "responses 或 chat_completions");
+  assertStringIncludes(body, "Worker Secret");
+  assertStringIncludes(body, "HF Space Repo");
+  assertStringIncludes(body, "手动同步到 HF Space 环境变量");
+  assertEquals(body.includes("会回写到 HF Space"), false);
   assertStringIncludes(body, "知识库");
 });
 

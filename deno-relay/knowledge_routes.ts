@@ -99,7 +99,10 @@ export async function handleKnowledgeRequest(
       }
       const query = normalizeString(body.query) ?? "";
       const requestedLimit = Number(body.limit ?? options.defaultSearchLimit);
-      const limit = Math.max(1, Math.min(Number.isFinite(requestedLimit) ? requestedLimit : options.defaultSearchLimit, 20));
+      const limit = Math.max(
+        1,
+        Math.min(Number.isFinite(requestedLimit) ? requestedLimit : options.defaultSearchLimit, 20),
+      );
       return json({
         personaId,
         query,

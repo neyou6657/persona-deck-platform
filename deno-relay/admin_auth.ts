@@ -21,7 +21,10 @@ export class AdminAuthError extends Error {
 export function createAdminAuthConfigFromEnv(): AdminAuthConfig {
   const passwordHash = Deno.env.get("ADMIN_PASSWORD_HASH")?.trim() ?? "";
   const sessionSecret = Deno.env.get("ADMIN_SESSION_SECRET")?.trim() ?? "";
-  const sessionTtlHours = Math.max(1, Number(Deno.env.get("ADMIN_SESSION_TTL_HOURS") ?? "24") || 24);
+  const sessionTtlHours = Math.max(
+    1,
+    Number(Deno.env.get("ADMIN_SESSION_TTL_HOURS") ?? "24") || 24,
+  );
   return {
     enabled: Boolean(passwordHash && sessionSecret),
     passwordHash,

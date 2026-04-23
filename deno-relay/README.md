@@ -1,9 +1,11 @@
 # deno-relay
 
 Persona-aware Deno control plane for the multi-persona platform:
+
 - HF Space workers connect outbound over `/agent`
 - workers register the persona ids they can serve
-- PostgreSQL is the system of record for personas, conversations, messages, runs, admin sessions, and knowledge docs
+- PostgreSQL is the system of record for personas, conversations, messages, runs, admin sessions,
+  and knowledge docs
 - Android or web clients use `/v1/...` APIs plus optional `/ws` real-time requests
 
 ## Endpoints
@@ -37,7 +39,8 @@ Persona-aware Deno control plane for the multi-persona platform:
 - `AGENT_TOKEN_PERSONAS_JSON` optional token map such as `{"secret-a":["coder"],"secret-b":"*"}`
 - `AGENT_REQUEST_TIMEOUT_MS` default `90000`
 - `PERSONA_CATALOG_JSON` optional persona seed array
-- `ADMIN_PASSWORD_HASH` preferred format `pbkdf2_sha256:<iterations>:<salt>:<hex>`; legacy `sha256:<hex>` still works for migration only
+- `ADMIN_PASSWORD_HASH` preferred format `pbkdf2_sha256:<iterations>:<salt>:<hex>`; legacy
+  `sha256:<hex>` still works for migration only
 - `ADMIN_SESSION_SECRET` pepper used to hash admin bearer tokens before persistence
 - `ADMIN_SESSION_TTL_HOURS` admin session lifetime, default `24`
 - `KNOWLEDGE_SEARCH_LIMIT` default skill search limit
@@ -104,9 +107,20 @@ Worker response:
 
 Temporary auth uses the `x-user-id` header. Glamorous? No. Effective? Absolutely.
 
-Admin auth is separate. `POST /v1/admin/login` returns a bearer token; all later admin calls use `Authorization: Bearer <token>`.
+Admin auth is separate. `POST /v1/admin/login` returns a bearer token; all later admin calls use
+`Authorization: Bearer <token>`.
 
-Knowledge routes are private to agents/tools. Call them with `Authorization: Bearer <AGENT_TOOL_SHARED_SECRET>` or `x-knowledge-secret`.
+Knowledge routes are private to agents/tools. Call them with
+`Authorization: Bearer <AGENT_TOOL_SHARED_SECRET>` or `x-knowledge-secret`.
+
+## HF Space Secret Sync
+
+Relay 不会自动回写 HF Space 的环境变量。新增或更新 `workerSecret` 后，请在对应 Space 手动同步：
+
+- `DENO_AGENT_SHARED_SECRET=<workerSecret>`
+- `DENO_KNOWLEDGE_SHARED_SECRET=<workerSecret>`
+
+保存 Space 变量并重启 Space 后，新的 worker secret 才会生效。
 
 ## Run
 
@@ -117,4 +131,6 @@ deno task check
 deno task start
 ```
 
-Before production startup, apply [`sql/001_control_plane_pg.sql`](/workspace/.worktrees/rollout-meta/deno-relay/sql/001_control_plane_pg.sql) to PostgreSQL. KV has retired; it served, it saluted, it went home.
+Before production startup, apply
+[`sql/001_control_plane_pg.sql`](/workspace/.worktrees/rollout-meta/deno-relay/sql/001_control_plane_pg.sql)
+to PostgreSQL. KV has retired; it served, it saluted, it went home.

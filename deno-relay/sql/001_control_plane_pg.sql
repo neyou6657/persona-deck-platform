@@ -101,6 +101,8 @@ create table if not exists agent_configs (
   agent_id text primary key,
   runtime text not null default 'codex_cli',
   api_kind text not null default 'responses',
+  worker_secret text not null default '',
+  space_repo_id text not null default '',
   model text not null default 'gpt-5.3-codex',
   api_base_url text not null default '',
   api_key text not null default '',
@@ -114,6 +116,10 @@ create table if not exists agent_configs (
 
 alter table if exists agent_configs
   add column if not exists api_kind text not null default 'responses';
+alter table if exists agent_configs
+  add column if not exists worker_secret text not null default '';
+alter table if exists agent_configs
+  add column if not exists space_repo_id text not null default '';
 
 create table if not exists admin_sessions (
   session_id_hash text primary key,

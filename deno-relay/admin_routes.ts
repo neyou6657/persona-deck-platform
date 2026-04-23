@@ -7,11 +7,12 @@ import {
   revokeAdminSession,
   verifyAdminPassword,
 } from "./admin_auth.ts";
-import type { ControlPlaneStore, JsonObject } from "./postgres.ts";
+import type { AgentConfigRecord, ControlPlaneStore, JsonObject } from "./postgres.ts";
 
 type AdminRouteOptions = {
   store: ControlPlaneStore;
   config?: AdminAuthConfig;
+  restartAgentConfig?: (agentId: string) => Promise<AgentConfigRecord>;
 };
 
 class AdminRouteError extends Error {
@@ -201,6 +202,8 @@ export async function handleAdminRequest(
         agentId,
         runtime: normalizeString(body.runtime) ?? undefined,
         apiKind: normalizeString(body.apiKind) ?? undefined,
+        workerSecret: typeof body.workerSecret === "string" ? body.workerSecret : undefined,
+        spaceRepoId: typeof body.spaceRepoId === "string" ? body.spaceRepoId : undefined,
         model: normalizeString(body.model) ?? undefined,
         apiBaseUrl: typeof body.apiBaseUrl === "string" ? body.apiBaseUrl : undefined,
         apiKey: typeof body.apiKey === "string" ? body.apiKey : undefined,
@@ -228,6 +231,8 @@ export async function handleAdminRequest(
           runtime,
           apiKind: normalizeString(agentInstances[0]?.capabilities?.apiKind) ??
             defaultApiKindForRuntime(runtime),
+          workerSecret: "",
+          spaceRepoId: "",
           model: normalizeString(agentInstances[0]?.capabilities?.model) ?? "",
           apiBaseUrl: normalizeString(agentInstances[0]?.capabilities?.apiBaseUrl) ?? "",
           apiKey: "",
@@ -257,6 +262,12 @@ export async function handleAdminRequest(
           agentId,
           runtime: normalizeString(body.runtime) ?? current.runtime,
           apiKind: normalizeString(body.apiKind) ?? current.apiKind,
+          workerSecret: typeof body.workerSecret === "string"
+            ? body.workerSecret
+            : current.workerSecret,
+          spaceRepoId: typeof body.spaceRepoId === "string"
+            ? body.spaceRepoId
+            : current.spaceRepoId,
           model: normalizeString(body.model) ?? current.model,
           apiBaseUrl: typeof body.apiBaseUrl === "string" ? body.apiBaseUrl : current.apiBaseUrl,
           apiKey: typeof body.apiKey === "string" ? body.apiKey : current.apiKey,
@@ -279,7 +290,11 @@ export async function handleAdminRequest(
       if (!current) {
         throw new AdminRouteError(404, "agent_config_not_found", "Agent config not found");
       }
-      return json(await options.store.restartAgentConfig(agentId));
+      return json(
+        options.restartAgentConfig
+          ? await options.restartAgentConfig(agentId)
+          : await options.store.restartAgentConfig(agentId),
+      );
     }
 
     if (url.pathname === "/v1/admin/personas" && req.method === "POST") {

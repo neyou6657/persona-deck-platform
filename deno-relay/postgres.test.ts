@@ -162,6 +162,8 @@ Deno.test("agent config persists and restart generation increments only on resta
     agentId: "hf-space-coder-v1",
     runtime: "codex_cli",
     apiKind: "responses",
+    workerSecret: "wrk-secret-1",
+    spaceRepoId: "rain34572/responses-adapter-gateway",
     model: "gpt-5.4",
     apiBaseUrl: "https://relay.example/v1",
     apiKey: "sk-live-secret",
@@ -173,6 +175,8 @@ Deno.test("agent config persists and restart generation increments only on resta
 
   assertEquals(saved.restartGeneration, 0);
   assertEquals(saved.apiKind, "responses");
+  assertEquals(saved.workerSecret, "wrk-secret-1");
+  assertEquals(saved.spaceRepoId, "rain34572/responses-adapter-gateway");
   assertEquals(saved.enabledSkills, ["skill-a", "skill-b"]);
 
   const restarted = await store.restartAgentConfig("hf-space-coder-v1");
@@ -182,6 +186,8 @@ Deno.test("agent config persists and restart generation increments only on resta
   const reloaded = await store.getAgentConfig("hf-space-coder-v1");
   assertEquals(reloaded?.restartGeneration, 1);
   assertEquals(reloaded?.apiKind, "responses");
+  assertEquals(reloaded?.workerSecret, "wrk-secret-1");
+  assertEquals(reloaded?.spaceRepoId, "rain34572/responses-adapter-gateway");
   assertEquals(reloaded?.apiKey, "sk-live-secret");
 
   await store.close();

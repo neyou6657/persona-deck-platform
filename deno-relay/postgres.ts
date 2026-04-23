@@ -82,6 +82,8 @@ export type AgentConfigRecord = {
   agentId: string;
   runtime: string;
   apiKind: string;
+  workerSecret: string;
+  spaceRepoId: string;
   model: string;
   apiBaseUrl: string;
   apiKey: string;
@@ -146,6 +148,8 @@ export type UpsertAgentConfigInput = {
   agentId: string;
   runtime?: string;
   apiKind?: string;
+  workerSecret?: string;
+  spaceRepoId?: string;
   model?: string;
   apiBaseUrl?: string;
   apiKey?: string;
@@ -227,6 +231,7 @@ export type ControlPlaneStore = {
   listAgentInstances(): Promise<AgentInstanceRecord[]>;
   upsertAgentConfig(input: UpsertAgentConfigInput): Promise<AgentConfigRecord>;
   getAgentConfig(agentId: string): Promise<AgentConfigRecord | null>;
+  findAgentConfigByWorkerSecret(workerSecret: string): Promise<AgentConfigRecord | null>;
   listAgentConfigs(): Promise<AgentConfigRecord[]>;
   restartAgentConfig(agentId: string): Promise<AgentConfigRecord>;
   listKnowledgeDocs(personaId: string, limit: number): Promise<KnowledgeDocRecord[]>;
@@ -388,6 +393,8 @@ function normalizeAgentConfigRecord(
       row.runtime,
       row.apiKind ?? defaultApiKindForRuntime(row.runtime),
     ),
+    workerSecret: typeof row.workerSecret === "string" ? row.workerSecret.trim() : "",
+    spaceRepoId: typeof row.spaceRepoId === "string" ? row.spaceRepoId.trim() : "",
     enabledSkills: normalizeStringArrayValue(row.enabledSkills),
   };
 }
@@ -814,6 +821,12 @@ class MemoryControlPlaneStore implements ControlPlaneStore {
         runtime,
         input.apiKind ?? current?.apiKind ?? defaultApiKindForRuntime(runtime),
       ),
+      workerSecret: input.workerSecret !== undefined
+        ? input.workerSecret.trim()
+        : current?.workerSecret ?? "",
+      spaceRepoId: input.spaceRepoId !== undefined
+        ? input.spaceRepoId.trim()
+        : current?.spaceRepoId ?? "",
       model: input.model?.trim() || current?.model || "gpt-5.3-codex",
       apiBaseUrl: input.apiBaseUrl !== undefined
         ? input.apiBaseUrl.trim()
@@ -834,6 +847,19 @@ class MemoryControlPlaneStore implements ControlPlaneStore {
 
   async getAgentConfig(agentId: string): Promise<AgentConfigRecord | null> {
     return this.agentConfigs.get(agentId) ?? null;
+  }
+
+  async findAgentConfigByWorkerSecret(workerSecret: string): Promise<AgentConfigRecord | null> {
+    const normalized = workerSecret.trim();
+    if (!normalized) {
+      return null;
+    }
+    for (const record of this.agentConfigs.values()) {
+      if (record.workerSecret === normalized) {
+        return record;
+      }
+    }
+    return null;
   }
 
   async listAgentConfigs(): Promise<AgentConfigRecord[]> {
@@ -1916,6 +1942,12 @@ class PostgresControlPlaneStore implements ControlPlaneStore {
       runtime,
       input.apiKind ?? current?.apiKind ?? defaultApiKindForRuntime(runtime),
     );
+    const workerSecret = input.workerSecret !== undefined
+      ? input.workerSecret.trim()
+      : current?.workerSecret ?? "";
+    const spaceRepoId = input.spaceRepoId !== undefined
+      ? input.spaceRepoId.trim()
+      : current?.spaceRepoId ?? "";
     const model = input.model?.trim() || current?.model || "gpt-5.3-codex";
     const apiBaseUrl = input.apiBaseUrl !== undefined
       ? input.apiBaseUrl.trim()
@@ -1934,6 +1966,8 @@ class PostgresControlPlaneStore implements ControlPlaneStore {
         agent_id,
         runtime,
         api_kind,
+        worker_secret,
+        space_repo_id,
         model,
         api_base_url,
         api_key,
@@ -1947,6 +1981,8 @@ class PostgresControlPlaneStore implements ControlPlaneStore {
         ${input.agentId},
         ${runtime},
         ${apiKind},
+        ${workerSecret},
+        ${spaceRepoId},
         ${model},
         ${apiBaseUrl},
         ${apiKey},
@@ -1960,6 +1996,8 @@ class PostgresControlPlaneStore implements ControlPlaneStore {
       on conflict (agent_id) do update set
         runtime = excluded.runtime,
         api_kind = excluded.api_kind,
+        worker_secret = excluded.worker_secret,
+        space_repo_id = excluded.space_repo_id,
         model = excluded.model,
         api_base_url = excluded.api_base_url,
         api_key = excluded.api_key,
@@ -1972,6 +2010,8 @@ class PostgresControlPlaneStore implements ControlPlaneStore {
         agent_id as "agentId",
         runtime,
         api_kind as "apiKind",
+        worker_secret as "workerSecret",
+        space_repo_id as "spaceRepoId",
         model,
         api_base_url as "apiBaseUrl",
         api_key as "apiKey",
@@ -1991,6 +2031,8 @@ class PostgresControlPlaneStore implements ControlPlaneStore {
         agent_id as "agentId",
         runtime,
         api_kind as "apiKind",
+        worker_secret as "workerSecret",
+        space_repo_id as "spaceRepoId",
         model,
         api_base_url as "apiBaseUrl",
         api_key as "apiKey",
@@ -2007,12 +2049,42 @@ class PostgresControlPlaneStore implements ControlPlaneStore {
     return row ? normalizeAgentConfigRecord(row) : null;
   }
 
+  async findAgentConfigByWorkerSecret(workerSecret: string): Promise<AgentConfigRecord | null> {
+    const normalized = workerSecret.trim();
+    if (!normalized) {
+      return null;
+    }
+    const [row] = await this.sql`
+      select
+        agent_id as "agentId",
+        runtime,
+        api_kind as "apiKind",
+        worker_secret as "workerSecret",
+        space_repo_id as "spaceRepoId",
+        model,
+        api_base_url as "apiBaseUrl",
+        api_key as "apiKey",
+        system_prompt as "systemPrompt",
+        temperature,
+        store,
+        enabled_skills as "enabledSkills",
+        restart_generation as "restartGeneration",
+        updated_at::text as "updatedAt"
+      from agent_configs
+      where worker_secret = ${normalized}
+      limit 1
+    `;
+    return row ? normalizeAgentConfigRecord(row) : null;
+  }
+
   async listAgentConfigs(): Promise<AgentConfigRecord[]> {
     const rows = await this.sql`
       select
         agent_id as "agentId",
         runtime,
         api_kind as "apiKind",
+        worker_secret as "workerSecret",
+        space_repo_id as "spaceRepoId",
         model,
         api_base_url as "apiBaseUrl",
         api_key as "apiKey",
@@ -2039,6 +2111,8 @@ class PostgresControlPlaneStore implements ControlPlaneStore {
         agent_id as "agentId",
         runtime,
         api_kind as "apiKind",
+        worker_secret as "workerSecret",
+        space_repo_id as "spaceRepoId",
         model,
         api_base_url as "apiBaseUrl",
         api_key as "apiKey",

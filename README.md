@@ -1,63 +1,95 @@
-# Multi-Persona Agent Workspace
+# 多人格 Agent 工作区（persona-deck-platform）
 
-This repository is the main public app repo for a multi-persona agent platform:
+这是一个多人格 Agent 平台的主仓库，当前由三部分组成：
 
-- [`deno-relay`](deno-relay): Deno control plane for auth, persona routing, sessions, runs, knowledge APIs, and admin management
-- [`hf-space-agent`](hf-space-agent): Hugging Face outbound worker that connects to Deno and bootstraps public Codex skills at startup
-- [`android-client`](android-client): RikkaHub-based Android client that talks to Deno, syncs personas, browses threads, and handles persona chat UX
+- [`deno-relay`](deno-relay)：控制平面（鉴权、人格路由、会话/消息/运行记录、知识库、管理台）
+- [`hf-space-agent`](hf-space-agent)：运行在 Hugging Face Space 的执行 Worker（主动连回 Deno）
+- [`android-client`](android-client)：Android 客户端（同步人格、查看会话、发起对话）
 
-## Runtime Shape
+一句话拓扑：`Android/Web -> Deno Relay -> HF Space Worker`。
 
-The production split is intentionally boring and therefore survivable:
+## 当前运行逻辑（2026-04）
 
-1. Android talks to Deno.
-2. Deno owns durable state, persona routing, and the knowledge gateway.
-3. Hugging Face workers connect outbound to Deno and do execution only.
-4. Public Codex skills are published in a separate public GitHub repo and pulled into `~/.codex/skills` during HF startup.
+1. 客户端只和 `deno-relay` 通信。
+2. `deno-relay` 持久化所有核心状态（PostgreSQL）。
+3. HF Space 上的 worker 通过 `/agent` WebSocket 主动注册并接收任务。
+4. 知识库走 `deno-relay` 的私有知识接口，不直接暴露给外部。
+5. `workerSecret` 不会由 relay 自动回写到 HF；需要你手动改 HF 环境变量。
 
-## Public Repo Split
+## 部署流程（按现在的真实链路）
 
-- Main public repo: Deno relay + HF worker + Android app + GitHub Actions
-- Skills public repo: Codex skills only, published separately so HF startup can pull a small archive into `~/.codex/skills`
-- Runtime secrets: stay in Deno Deploy, Hugging Face Space secrets, or GitHub Actions secrets; they do not belong in git unless your hobby is self-sabotage
+### 1. 部署并初始化 `deno-relay`
 
-## Docs
+1. 准备 PostgreSQL。
+2. 执行建表脚本：[`deno-relay/sql/001_control_plane_pg.sql`](deno-relay/sql/001_control_plane_pg.sql)。
+3. 配置 `deno-relay` 环境变量（至少包含）：
+   - `DATABASE_URL`
+   - `ADMIN_PASSWORD_HASH`
+   - `ADMIN_SESSION_SECRET`
+   - `AGENT_TOOL_SHARED_SECRET`
+4. 启动：
 
-- Specs: [`docs/superpowers/specs/2026-04-18-multi-persona-platform/`](docs/superpowers/specs/2026-04-18-multi-persona-platform/)
-- Plans: [`docs/superpowers/plans/`](docs/superpowers/plans/)
-
-## Package Notes
-
-- [`deno-relay/README.md`](deno-relay/README.md) tracks PostgreSQL, admin auth, relay protocol, and deployment notes
-- [`hf-space-agent/README.md`](hf-space-agent/README.md) tracks worker runtime, startup sync, relay wiring, and environment variables
-- [`android-client/`](android-client) contains the RikkaHub-based client shell for Deno-backed persona sync, thread browsing, and chat
-- [`.github/workflows/android-preview.yml`](.github/workflows/android-preview.yml) builds a preview APK plus the larger Android artifact on GitHub Actions
-
-## Example: Add A Graduate Persona Agent
-
-Example target:
-
-- `personaId`: `grad-student`
-- `displayName`: `研究生`
-
-Steps:
-
-1. Open the Deno admin page, log in, create a persona with `personaId=grad-student` and `displayName=研究生`.
-2. In the same admin page, add this persona's knowledge docs so Deno owns the knowledge instead of the HF Space.
-3. Deploy one dedicated HF Space worker with:
-
-```env
-AGENT_ID=hf-space-grad-student-v1
-AGENT_PERSONA_IDS=grad-student
-DENO_AGENT_WS_URL=wss://your-deno-domain/agent
-DENO_AGENT_SHARED_SECRET=your_worker_secret
-AGENT_RUNTIME=responses
-AGENT_MODEL=gpt-5.3-codex
-AGENT_API_BASE_URL=https://your-openai-compatible-endpoint/v1
-AGENT_API_KEY=your_api_key
-DENO_KNOWLEDGE_BASE_URL=https://your-deno-domain
-DENO_KNOWLEDGE_SHARED_SECRET=your_knowledge_secret
+```bash
+cd deno-relay
+deno task test
+deno task check
+deno task start
 ```
 
-4. After the worker connects, the Deno admin page should show `grad-student` as online.
-5. Sync personas in the client, open `研究生`, then continue old chats or start a new one.
+说明：完整变量请看 [`deno-relay/.env.example`](deno-relay/.env.example)。
+
+### 2. 在管理台创建人格与 Agent 配置
+
+1. 打开 `https://你的-relay-域名/` 登录管理台。
+2. 创建或编辑人格（persona）。
+3. 在 Agent 控制里填写：
+   - `agentId`
+   - `runtime` / `apiKind`
+   - `model` / `apiBaseUrl` / `apiKey`
+   - `workerSecret`（可在页面生成）
+   - `spaceRepoId`（建议填，方便管理）
+4. 保存并重启 Agent 配置。
+
+### 3. 部署 HF Space Worker
+
+在 HF Space（Docker SDK）配置至少以下环境变量：
+
+- `DENO_AGENT_WS_URL=wss://你的-relay-域名/agent`
+- `DENO_AGENT_SHARED_SECRET=<与管理台 workerSecret 一致>`
+- `DENO_KNOWLEDGE_BASE_URL=https://你的-relay-域名`
+- `DENO_KNOWLEDGE_SHARED_SECRET=<与管理台 workerSecret 一致或你的知识密钥策略值>`
+- `AGENT_ID=<例如 hf-space-coder-v1>`
+- `AGENT_PERSONA_IDS=<例如 coder>`
+- `AGENT_RUNTIME=<responses|codex_cli|opencode_cli>`
+- `AGENT_MODEL=<你的模型名>`
+- `AGENT_API_BASE_URL=<你的模型网关地址>`
+- `AGENT_API_KEY=<你的密钥>`
+
+然后重启 Space。
+
+### 4. 手动同步 Secret（重点）
+
+当你在管理台更新了 `workerSecret`，需要手动去 HF Space 更新：
+
+- `DENO_AGENT_SHARED_SECRET`
+- `DENO_KNOWLEDGE_SHARED_SECRET`
+
+不手动改的话，worker 会继续拿旧 secret 连，结果就是“我觉得我改了，但它觉得没改”。
+
+### 5. 验证联通
+
+- `GET /healthz` 看服务状态。
+- 管理台里确认对应 persona/agent 显示在线。
+- 客户端同步人格后发起对话，确认 run 能完成。
+
+## 仓库说明
+
+- `deno-relay` 详细说明：[`deno-relay/README.md`](deno-relay/README.md)
+- `hf-space-agent` 详细说明：[`hf-space-agent/README.md`](hf-space-agent/README.md)
+- Android 客户端基础：[`android-client/`](android-client)
+
+## 安全提醒
+
+- 不要把任何生产密钥提交到 git。
+- 运行期密钥放在 Deno Deploy / Hugging Face Secrets / GitHub Secrets。
+- 如果你把密钥传上去了，建议默认按“已泄漏”处理并立刻轮换。
