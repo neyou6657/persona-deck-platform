@@ -1,5 +1,9 @@
 import postgres from "npm:postgres";
 
+const CONTROL_PLANE_SCHEMA_SQL = await Deno.readTextFile(
+  new URL("./sql/001_control_plane_pg.sql", import.meta.url),
+);
+
 export type JsonObject = Record<string, unknown>;
 export type MessageRole = "user" | "assistant";
 export type RunStatus = "queued" | "in_progress" | "completed" | "failed" | "timed_out";
@@ -254,6 +258,19 @@ export function createDbClient(databaseUrl: string) {
     prepare: true,
     ssl: "require",
   });
+}
+
+export async function ensureControlPlaneSchema(databaseUrl: string): Promise<void> {
+  const sql = postgres(databaseUrl, {
+    max: 1,
+    prepare: false,
+    ssl: "require",
+  });
+  try {
+    await sql.unsafe(CONTROL_PLANE_SCHEMA_SQL);
+  } finally {
+    await sql.end({ timeout: 1 });
+  }
 }
 
 export function createPostgresControlPlaneStore(databaseUrl: string): ControlPlaneStore {

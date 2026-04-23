@@ -11,6 +11,7 @@ import {
   type AgentConfigRecord,
   type AgentInstanceRecord,
   type ConversationRecord,
+  ensureControlPlaneSchema,
   createPostgresControlPlaneStore,
   type JsonObject,
   type PersonaSeed,
@@ -181,6 +182,7 @@ if (!DATABASE_URL) {
   throw new Error("DATABASE_URL is required");
 }
 
+await ensureControlPlaneSchema(DATABASE_URL);
 const store = createPostgresControlPlaneStore(DATABASE_URL);
 const workerRegistry = createWorkerRegistryState();
 const agentConnectionsBySocket = new Map<WebSocket, AgentConnection>();
