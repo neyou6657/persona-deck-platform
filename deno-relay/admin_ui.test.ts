@@ -27,7 +27,11 @@ Deno.test("renderAdminPage returns login-first admin console html", async () => 
   assertStringIncludes(body, "/v1/admin/agents");
   assertStringIncludes(body, "Agent 控制");
   assertStringIncludes(body, "API 格式");
-  assertStringIncludes(body, "responses 或 chat_completions");
+  assertStringIncludes(body, '<select id="agentRuntimeInput"');
+  assertStringIncludes(body, '<select id="agentApiKindInput"');
+  assertStringIncludes(body, '<select id="agentSkillsInput"');
+  assertStringIncludes(body, "按住 Ctrl / Cmd 可多选");
+  assertEquals(body.includes("每行一个 skill slug"), false);
   assertStringIncludes(body, "Worker Secret");
   assertStringIncludes(body, "HF Space Repo");
   assertStringIncludes(body, "手动同步到 HF Space 环境变量");

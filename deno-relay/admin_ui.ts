@@ -149,7 +149,7 @@ export function renderAdminPage(): Response {
         font-size: 13px;
         color: var(--muted);
       }
-      input, textarea {
+      input, textarea, select {
         width: 100%;
         border: 1px solid var(--line);
         border-radius: 16px;
@@ -161,6 +161,10 @@ export function renderAdminPage(): Response {
       textarea {
         min-height: 118px;
         resize: vertical;
+      }
+      select[multiple] {
+        min-height: 168px;
+        padding: 8px 10px;
       }
       button {
         appearance: none;
@@ -338,13 +342,20 @@ export function renderAdminPage(): Response {
                 </label>
                 <label>
                   Runtime
-                  <input id="agentRuntimeInput" type="text" placeholder="codex_cli、responses 或 opencode_cli" />
+                  <select id="agentRuntimeInput">
+                    <option value="codex_cli">codex_cli</option>
+                    <option value="responses">responses</option>
+                    <option value="opencode_cli">opencode_cli</option>
+                  </select>
                 </label>
               </div>
               <div class="two-up">
                 <label>
                   API 格式
-                  <input id="agentApiKindInput" type="text" placeholder="responses 或 chat_completions" />
+                  <select id="agentApiKindInput">
+                    <option value="responses">responses</option>
+                    <option value="chat_completions">chat_completions</option>
+                  </select>
                 </label>
                 <label>
                   HF Space Repo
@@ -391,7 +402,8 @@ export function renderAdminPage(): Response {
               </label>
               <label>
                 Enabled Skills
-                <textarea id="agentSkillsInput" placeholder="每行一个 skill slug，例如&#10;restart&#10;project-audit"></textarea>
+                <select id="agentSkillsInput" multiple size="8"></select>
+                <span class="hint">按住 Ctrl / Cmd 可多选。留空表示不给 agent 强制下发 skills 列表。</span>
               </label>
               <div id="agentAvailableSkills" class="hint">当前还没有上报可用 skills。</div>
               <div id="agentInstancesHint" class="hint">当前还没有观测到这个 agent 的实例。</div>
@@ -481,6 +493,7 @@ export function renderAdminPage(): Response {
         selectedAgentId: "",
         agentConfigs: [],
         agentInstances: [],
+        knownSkills: [],
       };
 
       const statusEl = document.getElementById("status");
@@ -575,6 +588,83 @@ export function renderAdminPage(): Response {
         return String(runtime || "").trim().toLowerCase() === "opencode_cli"
           ? "chat_completions"
           : "responses";
+      }
+
+      function normalizeRuntime(runtime) {
+        const normalized = String(runtime || "").trim().toLowerCase();
+        if (normalized === "responses" || normalized === "opencode_cli" || normalized === "codex_cli") {
+          return normalized;
+        }
+        return "codex_cli";
+      }
+
+      function normalizeApiKind(runtime, apiKind) {
+        const normalizedRuntime = normalizeRuntime(runtime);
+        if (normalizedRuntime === "opencode_cli") {
+          return "chat_completions";
+        }
+        return "responses";
+      }
+
+      function collectKnownSkills(skills) {
+        const items = Array.isArray(skills) ? skills : [];
+        for (const item of items) {
+          if (typeof item !== "string") {
+            continue;
+          }
+          const skill = item.trim();
+          if (!skill) {
+            continue;
+          }
+          if (!state.knownSkills.includes(skill)) {
+            state.knownSkills.push(skill);
+          }
+        }
+        state.knownSkills.sort((left, right) => left.localeCompare(right));
+      }
+
+      function rebuildSkillsSelect(selectedSkills = []) {
+        const selected = new Set(
+          (Array.isArray(selectedSkills) ? selectedSkills : [])
+            .filter((item) => typeof item === "string")
+            .map((item) => item.trim())
+            .filter(Boolean),
+        );
+        agentSkillsInputEl.innerHTML = "";
+        for (const skill of state.knownSkills) {
+          const option = document.createElement("option");
+          option.value = skill;
+          option.textContent = skill;
+          option.selected = selected.has(skill);
+          agentSkillsInputEl.appendChild(option);
+        }
+      }
+
+      function getSelectedSkills() {
+        return Array.from(agentSkillsInputEl.selectedOptions)
+          .map((option) => option.value.trim())
+          .filter(Boolean);
+      }
+
+      function applyApiKindOptions(runtime, preferredApiKind) {
+        const normalizedRuntime = normalizeRuntime(runtime);
+        const normalizedPreferred = normalizeApiKind(normalizedRuntime, preferredApiKind);
+        const nextOptions = normalizedRuntime === "opencode_cli"
+          ? [{ value: "chat_completions", label: "chat_completions" }]
+          : [{ value: "responses", label: "responses" }];
+        const existing = Array.from(agentApiKindInputEl.options).map((option) => option.value);
+        const sameShape = existing.length === nextOptions.length &&
+          existing.every((value, index) => value === nextOptions[index].value);
+        if (!sameShape) {
+          agentApiKindInputEl.innerHTML = "";
+          for (const nextOption of nextOptions) {
+            const option = document.createElement("option");
+            option.value = nextOption.value;
+            option.textContent = nextOption.label;
+            agentApiKindInputEl.appendChild(option);
+          }
+        }
+        agentApiKindInputEl.value = normalizedPreferred;
       }
 
       function generateWorkerSecret() {
@@ -700,7 +790,7 @@ export function renderAdminPage(): Response {
         state.selectedAgentId = "";
         agentIdInputEl.value = "";
         agentRuntimeInputEl.value = "codex_cli";
-        agentApiKindInputEl.value = "responses";
+        applyApiKindOptions("codex_cli", "responses");
         agentSpaceRepoInputEl.value = "";
         agentModelInputEl.value = "";
         agentEndpointInputEl.value = "";
@@ -709,7 +799,7 @@ export function renderAdminPage(): Response {
         agentTemperatureInputEl.value = "0.2";
         agentStoreInputEl.checked = true;
         agentSystemPromptInputEl.value = "";
-        agentSkillsInputEl.value = "";
+        rebuildSkillsSelect([]);
         agentAvailableSkillsEl.textContent = "当前还没有上报可用 skills。";
         agentInstancesHintEl.textContent = "当前还没有观测到这个 agent 的实例。";
       }
@@ -740,6 +830,13 @@ export function renderAdminPage(): Response {
         const payload = await api("/v1/admin/agents");
         state.agentConfigs = Array.isArray(payload.agentConfigs) ? payload.agentConfigs : [];
         state.agentInstances = Array.isArray(payload.agentInstances) ? payload.agentInstances : [];
+        for (const config of state.agentConfigs) {
+          collectKnownSkills(config?.enabledSkills);
+        }
+        for (const instance of state.agentInstances) {
+          collectKnownSkills(instance?.capabilities?.availableSkills);
+          collectKnownSkills(instance?.capabilities?.enabledSkills);
+        }
         const rows = buildAgentRows();
         if (!preserveSelection || !rows.some((item) => item.agentId === state.selectedAgentId)) {
           state.selectedAgentId = rows[0]?.agentId || "";
@@ -773,8 +870,9 @@ export function renderAdminPage(): Response {
         const instances = Array.isArray(payload.instances) ? payload.instances : [];
         state.selectedAgentId = config.agentId;
         agentIdInputEl.value = config.agentId || "";
-        agentRuntimeInputEl.value = config.runtime || "codex_cli";
-        agentApiKindInputEl.value = config.apiKind || defaultApiKindForRuntime(config.runtime);
+        const runtime = normalizeRuntime(config.runtime || "codex_cli");
+        agentRuntimeInputEl.value = runtime;
+        applyApiKindOptions(runtime, config.apiKind || defaultApiKindForRuntime(runtime));
         agentSpaceRepoInputEl.value = config.spaceRepoId || "";
         agentModelInputEl.value = config.model || "";
         agentEndpointInputEl.value = config.apiBaseUrl || "";
@@ -783,10 +881,12 @@ export function renderAdminPage(): Response {
         agentTemperatureInputEl.value = String(config.temperature ?? 0.2);
         agentStoreInputEl.checked = Boolean(config.store);
         agentSystemPromptInputEl.value = config.systemPrompt || "";
-        agentSkillsInputEl.value = Array.isArray(config.enabledSkills) ? config.enabledSkills.join("\\n") : "";
         const availableSkills = Array.from(new Set(instances.flatMap((instance) => Array.isArray(instance.capabilities?.availableSkills)
           ? instance.capabilities.availableSkills
           : [])));
+        collectKnownSkills(availableSkills);
+        collectKnownSkills(config.enabledSkills);
+        rebuildSkillsSelect(Array.isArray(config.enabledSkills) ? config.enabledSkills : []);
         agentAvailableSkillsEl.textContent = availableSkills.length
           ? ("可用 skills: " + availableSkills.join(", "))
           : "当前 worker 还没上报可用 skills。";
@@ -851,11 +951,15 @@ export function renderAdminPage(): Response {
         saveAgentButtonEl.disabled = true;
         restartAgentButtonEl.disabled = true;
         try {
+          const runtime = normalizeRuntime(agentRuntimeInputEl.value);
+          const apiKind = normalizeApiKind(runtime, agentApiKindInputEl.value);
+          applyApiKindOptions(runtime, apiKind);
+          const enabledSkills = getSelectedSkills();
+          collectKnownSkills(enabledSkills);
           const payload = {
             agentId,
-            runtime: agentRuntimeInputEl.value.trim() || "codex_cli",
-            apiKind: agentApiKindInputEl.value.trim() ||
-              defaultApiKindForRuntime(agentRuntimeInputEl.value),
+            runtime,
+            apiKind,
             spaceRepoId: agentSpaceRepoInputEl.value.trim(),
             model: agentModelInputEl.value.trim(),
             apiBaseUrl: agentEndpointInputEl.value.trim(),
@@ -864,7 +968,7 @@ export function renderAdminPage(): Response {
             temperature: Number(agentTemperatureInputEl.value || "0.2"),
             store: agentStoreInputEl.checked,
             systemPrompt: agentSystemPromptInputEl.value,
-            enabledSkills: agentSkillsInputEl.value.split(/\\r?\\n/).map((item) => item.trim()).filter(Boolean),
+            enabledSkills,
           };
           const hasPersistedConfig = state.agentConfigs.some((item) => item.agentId === agentId);
           if (state.selectedAgentId && state.selectedAgentId === agentId && hasPersistedConfig) {
@@ -1049,11 +1153,9 @@ export function renderAdminPage(): Response {
         setStatus("新 Worker Secret 已生成。记得手动同步到 HF Space 环境变量。", "ok");
       });
       agentRuntimeInputEl.addEventListener("change", () => {
-        const nextApiKind = defaultApiKindForRuntime(agentRuntimeInputEl.value);
-        const currentApiKind = agentApiKindInputEl.value.trim();
-        if (!currentApiKind || currentApiKind === "responses" || currentApiKind === "chat_completions") {
-          agentApiKindInputEl.value = nextApiKind;
-        }
+        const runtime = normalizeRuntime(agentRuntimeInputEl.value);
+        agentRuntimeInputEl.value = runtime;
+        applyApiKindOptions(runtime, agentApiKindInputEl.value);
       });
       saveAgentButtonEl.addEventListener("click", async () => {
         await saveAgentConfig();

@@ -122,6 +122,36 @@ Relay 不会自动回写 HF Space 的环境变量。新增或更新 `workerSecre
 
 保存 Space 变量并重启 Space 后，新的 worker secret 才会生效。
 
+## Enabled Skills 工作方式
+
+`enabledSkills` 是 relay 控制面下发给 worker 的“技能白名单”配置，生效路径如下：
+
+1. 你在管理台保存 Agent 配置（包含 `enabledSkills`）。
+2. 点击“保存并重启 Agent”后，relay 会给该 worker 下发 `control/restart` 消息，消息里包含 `enabledSkills`。
+3. HF Space worker 收到重启配置后，会执行技能同步（从 `SKILLS_REPO_URL` + `SKILLS_REPO_SUBDIR` 拉取）。
+4. worker 用下发的 `enabledSkills` 过滤仓库中的技能目录，只保留命中的技能到 `${CODEX_HOME}/skills`。
+
+注意：
+
+- 如果 `enabledSkills` 为空数组，表示“这次不强制启用任何技能”。
+- 如果某个 skill 不在仓库里，worker 会忽略它，不会凭空创造。
+- 可探测技能列表来自 worker 上报的 `capabilities.availableSkills`，管理台会基于这个列表显示多选项。
+
+## 自动探测 + 保存重启自动配置（你想要的状态）
+
+当前已经基本支持这条链路：
+
+- 自动探测来源：HF worker 配置的 `SKILLS_REPO_URL` + `SKILLS_REPO_SUBDIR`
+- 探测时机：worker 启动、以及收到 relay 的重启控制后
+- 管理台操作：选择 `enabledSkills`（多选）-> 保存并重启
+- 自动生效：worker 在重启控制里按你选择的列表同步并过滤技能
+
+建议固定一套约定：
+
+- 在每个 HF worker 上统一配置技能仓库（`SKILLS_REPO_URL`、`SKILLS_REPO_REF`、`SKILLS_REPO_SUBDIR`）。
+- 在管理台只维护每个 agent 的 `enabledSkills` 选择，不再手填字符串。
+- 每次变更选择后都走“保存并重启 Agent”。
+
 ## Run
 
 ```bash
